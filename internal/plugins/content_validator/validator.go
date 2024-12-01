@@ -8,12 +8,15 @@ import (
 	"strings"
 
 	"ai-gateway/internal/plugins"
+
+	"github.com/sirupsen/logrus"
 )
 
 type ContentValidator struct {
 	allowedTypes []string
 	maxSize      int64
 	fields       []string // Fields to validate/forward
+	logger       *logrus.Logger
 }
 
 type Config struct {
@@ -22,11 +25,12 @@ type Config struct {
 	Fields       []string `json:"fields"` // Fields to include
 }
 
-func NewContentValidator(config Config) *ContentValidator {
+func NewContentValidator(config Config, logger *logrus.Logger) *ContentValidator {
 	return &ContentValidator{
 		allowedTypes: config.AllowedTypes,
 		maxSize:      config.MaxSize,
 		fields:       config.Fields,
+		logger:       logger,
 	}
 }
 
@@ -47,6 +51,16 @@ func (v *ContentValidator) Parallel() bool {
 }
 
 func (v *ContentValidator) ProcessRequest(ctx context.Context, reqCtx *plugins.RequestContext) error {
+	v.logger.WithFields(logrus.Fields{
+		"plugin":       "content_validator",
+		"tenant_id":    reqCtx.TenantID,
+		"path":         reqCtx.OriginalRequest.URL.Path,
+		"method":       reqCtx.OriginalRequest.Method,
+		"fields":       v.fields,
+		"max_size":     v.maxSize,
+		"content_type": reqCtx.OriginalRequest.Header.Get("Content-Type"),
+	}).Debug("Processing request")
+
 	// Validate content type
 	contentType := reqCtx.OriginalRequest.Header.Get("Content-Type")
 	valid := false
@@ -57,8 +71,19 @@ func (v *ContentValidator) ProcessRequest(ctx context.Context, reqCtx *plugins.R
 		}
 	}
 	if !valid {
+		v.logger.WithFields(logrus.Fields{
+			"plugin":        "content_validator",
+			"content_type":  contentType,
+			"allowed_types": v.allowedTypes,
+		}).Warn("Invalid content type")
 		return fmt.Errorf("invalid content type: %s", contentType)
 	}
+
+	// Log validation success
+	v.logger.WithFields(logrus.Fields{
+		"plugin":    "content_validator",
+		"tenant_id": reqCtx.TenantID,
+	}).Debug("Content validation successful")
 
 	// Read and parse the original request body
 	body, err := io.ReadAll(reqCtx.OriginalRequest.Body)

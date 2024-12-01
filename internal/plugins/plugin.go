@@ -88,6 +88,21 @@ func (r *Registry) ExecutePlugins(ctx context.Context, stage ExecutionStage, req
 		return nil
 	}
 
+	// Create request/response contexts
+	reqCtx := &RequestContext{
+		OriginalRequest: req,
+		ForwardRequest:  req.Clone(ctx),
+		Metadata:        make(map[string]interface{}),
+		RequestBody:     make(map[string]interface{}),
+	}
+
+	respCtx := &ResponseContext{
+		OriginalRequest: req,
+		Response:        resp,
+		Metadata:        make(map[string]interface{}),
+		ResponseBody:    make(map[string]interface{}),
+	}
+
 	// Group plugins by parallel capability
 	var serialPlugins, parallelPlugins []Plugin
 	for _, p := range plugins {
@@ -109,9 +124,9 @@ func (r *Registry) ExecutePlugins(ctx context.Context, stage ExecutionStage, req
 				defer wg.Done()
 				var err error
 				if resp == nil {
-					err = plugin.ProcessRequest(ctx, req)
+					err = plugin.ProcessRequest(ctx, reqCtx)
 				} else {
-					err = plugin.ProcessResponse(ctx, resp)
+					err = plugin.ProcessResponse(ctx, respCtx)
 				}
 				if err != nil {
 					errChan <- fmt.Errorf("plugin %s failed: %w", plugin.Name(), err)
@@ -135,9 +150,9 @@ func (r *Registry) ExecutePlugins(ctx context.Context, stage ExecutionStage, req
 	for _, p := range serialPlugins {
 		var err error
 		if resp == nil {
-			err = p.ProcessRequest(ctx, req)
+			err = p.ProcessRequest(ctx, reqCtx)
 		} else {
-			err = p.ProcessResponse(ctx, resp)
+			err = p.ProcessResponse(ctx, respCtx)
 		}
 		if err != nil {
 			return fmt.Errorf("plugin %s failed: %w", p.Name(), err)

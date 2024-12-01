@@ -6,12 +6,15 @@ import (
 	"strings"
 
 	"ai-gateway/internal/plugins"
+
+	"github.com/sirupsen/logrus"
 )
 
 type SecurityValidator struct {
 	requiredHeaders []string
 	blockedIPs      []string
 	fields          []string // Fields to validate
+	logger          *logrus.Logger
 }
 
 type Config struct {
@@ -20,11 +23,12 @@ type Config struct {
 	Fields          []string `json:"fields"` // Fields to validate
 }
 
-func NewSecurityValidator(config Config) *SecurityValidator {
+func NewSecurityValidator(config Config, logger *logrus.Logger) *SecurityValidator {
 	return &SecurityValidator{
 		requiredHeaders: config.RequiredHeaders,
 		blockedIPs:      config.BlockedIPs,
 		fields:          config.Fields,
+		logger:          logger,
 	}
 }
 
@@ -45,9 +49,21 @@ func (v *SecurityValidator) Parallel() bool {
 }
 
 func (v *SecurityValidator) ProcessRequest(ctx context.Context, reqCtx *plugins.RequestContext) error {
+	v.logger.WithFields(logrus.Fields{
+		"plugin":           "security_validator",
+		"tenant_id":        reqCtx.TenantID,
+		"path":             reqCtx.OriginalRequest.URL.Path,
+		"required_headers": v.requiredHeaders,
+		"client_ip":        reqCtx.OriginalRequest.RemoteAddr,
+	}).Debug("Starting security validation")
+
 	// Check required headers
 	for _, header := range v.requiredHeaders {
 		if reqCtx.OriginalRequest.Header.Get(header) == "" {
+			v.logger.WithFields(logrus.Fields{
+				"plugin": "security_validator",
+				"header": header,
+			}).Warn("Missing required header")
 			return fmt.Errorf("missing required header: %s", header)
 		}
 	}
@@ -56,18 +72,18 @@ func (v *SecurityValidator) ProcessRequest(ctx context.Context, reqCtx *plugins.
 	ip := strings.Split(reqCtx.OriginalRequest.RemoteAddr, ":")[0]
 	for _, blocked := range v.blockedIPs {
 		if ip == blocked {
+			v.logger.WithFields(logrus.Fields{
+				"plugin": "security_validator",
+				"ip":     ip,
+			}).Warn("Blocked IP attempted access")
 			return fmt.Errorf("IP %s is blocked", ip)
 		}
 	}
 
-	// Validate specific fields if configured
-	if len(v.fields) > 0 {
-		for _, field := range v.fields {
-			if _, exists := reqCtx.RequestBody[field]; !exists {
-				return fmt.Errorf("required field missing: %s", field)
-			}
-		}
-	}
+	v.logger.WithFields(logrus.Fields{
+		"plugin":    "security_validator",
+		"tenant_id": reqCtx.TenantID,
+	}).Debug("Security validation successful")
 
 	return nil
 }

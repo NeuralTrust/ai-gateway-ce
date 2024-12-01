@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"ai-gateway/internal/cache"
+	"ai-gateway/internal/plugins"
 )
 
 func setupTestServer() *Server {
@@ -23,12 +24,15 @@ func setupTestServer() *Server {
 		Port: 6379,
 	})
 
+	// Create plugin registry
+	pluginRegistry := plugins.NewRegistry()
+
 	config := &Config{
 		Port:       8080,
 		BaseDomain: "example.com",
 	}
 
-	return NewServer(config, mockCache, logger)
+	return NewServer(config, mockCache, logger, pluginRegistry)
 }
 
 func TestHealthCheck(t *testing.T) {
@@ -49,21 +53,21 @@ func TestForwardingRulesEndpoints(t *testing.T) {
 		method         string
 		path           string
 		expectedStatus int
-		host          string
+		host           string
 	}{
 		{
 			name:           "Get forwarding rules with valid tenant",
 			method:         "GET",
-			path:          "/api/v1/forwarding-rules",
+			path:           "/api/v1/forwarding-rules",
 			expectedStatus: 200,
-			host:          "tenant1.example.com",
+			host:           "tenant1.example.com",
 		},
 		{
 			name:           "Get forwarding rules with invalid tenant",
 			method:         "GET",
-			path:          "/api/v1/forwarding-rules",
+			path:           "/api/v1/forwarding-rules",
 			expectedStatus: 400,
-			host:          "invalid@.example.com",
+			host:           "invalid@.example.com",
 		},
 	}
 
@@ -76,4 +80,4 @@ func TestForwardingRulesEndpoints(t *testing.T) {
 			assert.Equal(t, tt.expectedStatus, w.Code)
 		})
 	}
-} 
+}

@@ -79,8 +79,8 @@ func (t *DataTransformer) ProcessRequest(ctx context.Context, reqCtx *plugins.Re
 		}
 	}
 
-	// Store transformed data in context
-	reqCtx.TransformedBody = transformedData
+	// Store transformed data in metadata instead
+	reqCtx.Metadata["transformed_body"] = transformedData
 
 	// Create new JSON body for the forward request
 	newBody, err := json.Marshal(transformedData)

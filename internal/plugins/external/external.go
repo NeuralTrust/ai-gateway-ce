@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"ai-gateway/internal/plugins"
+
+	"github.com/sirupsen/logrus"
 )
 
 type ExternalValidator struct {
@@ -18,7 +20,8 @@ type ExternalValidator struct {
 	authHeader string
 	timeout    time.Duration
 	retryCount int
-	fields     []string // Fields to validate
+	fields     []string
+	logger     *logrus.Logger
 }
 
 type Config struct {
@@ -29,7 +32,7 @@ type Config struct {
 	Fields     []string      `json:"fields"` // Fields to validate
 }
 
-func NewExternalValidator(config Config) *ExternalValidator {
+func NewExternalValidator(config Config, logger *logrus.Logger) *ExternalValidator {
 	return &ExternalValidator{
 		client: &http.Client{
 			Timeout: config.Timeout,
@@ -39,6 +42,7 @@ func NewExternalValidator(config Config) *ExternalValidator {
 		timeout:    config.Timeout,
 		retryCount: config.RetryCount,
 		fields:     config.Fields,
+		logger:     logger,
 	}
 }
 
@@ -59,7 +63,14 @@ func (e *ExternalValidator) Parallel() bool {
 }
 
 func (e *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *plugins.RequestContext) error {
-	// Extract only the fields we want to validate
+	e.logger.WithFields(logrus.Fields{
+		"plugin":    "external_validator",
+		"tenant_id": reqCtx.TenantID,
+		"endpoint":  e.endpoint,
+		"fields":    e.fields,
+	}).Debug("Starting external validation")
+
+	// Extract fields to validate
 	dataToValidate := make(map[string]interface{})
 	if len(e.fields) > 0 {
 		for _, field := range e.fields {
@@ -71,6 +82,44 @@ func (e *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *plugins.
 		dataToValidate = reqCtx.RequestBody
 	}
 
+	e.logger.WithFields(logrus.Fields{
+		"plugin":      "external_validator",
+		"data_fields": len(dataToValidate),
+	}).Debug("Prepared validation data")
+
+	// Send validation request with retries
+	var lastErr error
+	for i := 0; i <= e.retryCount; i++ {
+		err := e.sendValidationRequest(ctx, reqCtx, dataToValidate)
+		if err == nil {
+			e.logger.WithFields(logrus.Fields{
+				"plugin":  "external_validator",
+				"attempt": i + 1,
+			}).Debug("Validation successful")
+			return nil
+		}
+
+		lastErr = err
+		e.logger.WithFields(logrus.Fields{
+			"plugin":  "external_validator",
+			"attempt": i + 1,
+			"error":   err.Error(),
+		}).Warn("Validation attempt failed")
+
+		if i < e.retryCount {
+			time.Sleep(time.Second * time.Duration(i+1))
+		}
+	}
+
+	e.logger.WithFields(logrus.Fields{
+		"plugin": "external_validator",
+		"error":  lastErr.Error(),
+	}).Error("All validation attempts failed")
+
+	return fmt.Errorf("validation failed after %d attempts: %w", e.retryCount+1, lastErr)
+}
+
+func (e *ExternalValidator) sendValidationRequest(ctx context.Context, reqCtx *plugins.RequestContext, data map[string]interface{}) error {
 	// Prepare validation request
 	validationReq := struct {
 		TenantID string                 `json:"tenant_id"`
@@ -83,7 +132,7 @@ func (e *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *plugins.
 		Method:   reqCtx.OriginalRequest.Method,
 		Path:     reqCtx.OriginalRequest.URL.Path,
 		Headers:  make(map[string]string),
-		Body:     dataToValidate,
+		Body:     data,
 	}
 
 	// Copy relevant headers

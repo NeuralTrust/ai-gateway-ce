@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"os"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -17,6 +18,14 @@ func main() {
 	// Initialize logger
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
+
+	// Set log level from config or environment
+	logLevel := os.Getenv("LOG_LEVEL")
+	if logLevel == "debug" {
+		logger.SetLevel(logrus.DebugLevel)
+	} else {
+		logger.SetLevel(logrus.InfoLevel)
+	}
 
 	// Load configuration
 	config, err := loadConfig()
@@ -46,7 +55,7 @@ func main() {
 		AuthHeader: "Bearer your-api-key",
 		Timeout:    5 * time.Second,
 		RetryCount: 2,
-	})
+	}, logger)
 	pluginManager.Register(externalValidator)
 
 	// Create and start server

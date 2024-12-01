@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
@@ -105,7 +106,8 @@ func (p *Proxy) Handle(c *gin.Context) {
 func (p *Proxy) forwardRequest(c *gin.Context, rule *rules.ForwardingRule) error {
 	targetURL, err := url.Parse(rule.Target)
 	if err != nil {
-		return err
+		p.logger.WithError(err).Error("Failed to parse target URL")
+		return fmt.Errorf("invalid target URL: %w", err)
 	}
 
 	// Build the target path
@@ -113,14 +115,29 @@ func (p *Proxy) forwardRequest(c *gin.Context, rule *rules.ForwardingRule) error
 	if rule.StripPath {
 		targetPath = strings.TrimPrefix(targetPath, rule.Path)
 	}
-	targetURL.Path = path.Join(targetURL.Path, targetPath)
 
-	// Create the forwarded request
-	body, err := io.ReadAll(c.Request.Body)
-	if err != nil {
-		return err
+	// Ensure we have the complete path
+	fullPath := path.Join(targetURL.Path, targetPath)
+	if !strings.HasSuffix(c.Request.URL.Path, "/") && strings.HasSuffix(targetPath, "/") {
+		fullPath += "/"
+	}
+	targetURL.Path = fullPath
+
+	// Add query parameters if any
+	if c.Request.URL.RawQuery != "" {
+		targetURL.RawQuery = c.Request.URL.RawQuery
 	}
 
+	// Read the original body
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		p.logger.WithError(err).Error("Failed to read request body")
+		return fmt.Errorf("failed to read request body: %w", err)
+	}
+	// Restore the body for later use
+	c.Request.Body = io.NopCloser(bytes.NewReader(body))
+
+	// Create the forwarded request
 	forwardReq, err := http.NewRequestWithContext(
 		c.Request.Context(),
 		c.Request.Method,
@@ -128,12 +145,15 @@ func (p *Proxy) forwardRequest(c *gin.Context, rule *rules.ForwardingRule) error
 		bytes.NewReader(body),
 	)
 	if err != nil {
-		return err
+		p.logger.WithError(err).Error("Failed to create forward request")
+		return fmt.Errorf("failed to create forward request: %w", err)
 	}
 
-	// Copy headers
+	// Copy headers from original request
 	for k, v := range c.Request.Header {
-		forwardReq.Header[k] = v
+		if k != "Host" { // Skip the Host header
+			forwardReq.Header[k] = v
+		}
 	}
 
 	// Add custom headers from rule
@@ -141,51 +161,95 @@ func (p *Proxy) forwardRequest(c *gin.Context, rule *rules.ForwardingRule) error
 		forwardReq.Header.Set(k, v)
 	}
 
-	// Handle host header
-	if rule.PreserveHost {
-		forwardReq.Host = c.Request.Host
+	// Set proper Host header
+	forwardReq.Host = targetURL.Host
+
+	// Log the forward request details
+	p.logger.WithFields(logrus.Fields{
+		"method":      forwardReq.Method,
+		"target_url":  targetURL.String(),
+		"target_host": forwardReq.Host,
+		"target_path": targetURL.Path,
+		"headers":     forwardReq.Header,
+		"body_length": len(body),
+	}).Debug("Forwarding request")
+
+	// Forward the request
+	var resp *http.Response
+	var lastErr error
+	attempts := rule.RetryAttempts + 1
+
+	for i := 0; i < attempts; i++ {
+		resp, lastErr = p.client.Do(forwardReq)
+		if lastErr == nil {
+			if resp.StatusCode != http.StatusMisdirectedRequest {
+				break
+			}
+			resp.Body.Close()
+			lastErr = fmt.Errorf("misdirected request (421)")
+		}
+
+		logFields := logrus.Fields{
+			"attempt": i + 1,
+			"error":   lastErr.Error(),
+		}
+		if resp != nil {
+			logFields["status_code"] = resp.StatusCode
+		}
+
+		p.logger.WithFields(logFields).Warn("Request attempt failed")
+
+		// Create new body reader for retry
+		forwardReq.Body = io.NopCloser(bytes.NewReader(body))
+
+		// Wait before retry
+		if i < attempts-1 {
+			time.Sleep(time.Second * time.Duration(i+1))
+		}
 	}
 
-	// Execute pre-request plugins
-	if err := p.executePluginChain(c.Request.Context(), "pre_request", rule, forwardReq, nil); err != nil {
-		return fmt.Errorf("pre-request plugins failed: %w", err)
-	}
-
-	// Execute the request
-	resp, err := p.client.Do(forwardReq)
-	if err != nil {
-		return err
+	if lastErr != nil {
+		p.logger.WithError(lastErr).Error("All forward attempts failed")
+		return fmt.Errorf("failed to forward request after %d attempts: %w", attempts, lastErr)
 	}
 	defer resp.Body.Close()
 
-	// Execute post-request plugins
-	if err := p.executePluginChain(c.Request.Context(), "post_request", rule, forwardReq, nil); err != nil {
-		return fmt.Errorf("post-request plugins failed: %w", err)
+	// Read response body
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		p.logger.WithError(err).Error("Failed to read response body")
+		return fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Execute pre-response plugins
-	if err := p.executePluginChain(c.Request.Context(), "pre_response", rule, nil, resp); err != nil {
-		return fmt.Errorf("pre-response plugins failed: %w", err)
+	// Log response details
+	p.logger.WithFields(logrus.Fields{
+		"status_code": resp.StatusCode,
+		"headers":     resp.Header,
+		"body_length": len(respBody),
+	}).Debug("Received response")
+
+	// If there's an error response, try to parse it
+	if resp.StatusCode >= 400 {
+		var errorResp map[string]interface{}
+		if err := json.Unmarshal(respBody, &errorResp); err == nil {
+			p.logger.WithField("error_response", errorResp).Error("Received error response from target")
+		}
 	}
 
-	// Copy response to client
 	// Copy response headers
 	for k, v := range resp.Header {
 		c.Writer.Header()[k] = v
 	}
 
-	// Copy response status
+	// Write response
 	c.Writer.WriteHeader(resp.StatusCode)
-
-	// Copy response body
-	_, err = io.Copy(c.Writer, resp.Body)
-
-	// Execute post-response plugins
-	if err := p.executePluginChain(c.Request.Context(), "post_response", rule, nil, resp); err != nil {
-		return fmt.Errorf("post-response plugins failed: %w", err)
+	_, err = c.Writer.Write(respBody)
+	if err != nil {
+		p.logger.WithError(err).Error("Failed to write response")
+		return fmt.Errorf("failed to write response: %w", err)
 	}
 
-	return err
+	return nil
 }
 
 func (p *Proxy) executePluginChain(ctx context.Context, stage string, rule *rules.ForwardingRule, req *http.Request, resp *http.Response) error {

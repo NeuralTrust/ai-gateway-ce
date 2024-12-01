@@ -104,7 +104,7 @@ curl -X POST -H "Host: tenant1.example.com" \
     "target": "https://api.openai.com",
     "methods": ["POST"],
     "headers": {
-      "Authorization": "Bearer your-api-key"
+      "Authorization": "Bearer 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"
     },
     "plugin_chain": [
         {
@@ -117,29 +117,6 @@ curl -X POST -H "Host: tenant1.example.com" \
                 "allowed_types": ["application/json"],
                 "max_size": 1048576,
                 "fields": ["messages", "model"]
-            }
-        },
-        {
-            "name": "security_validator",
-            "enabled": true,
-            "stage": "pre_request",
-            "priority": 1,
-            "parallel": true,
-            "settings": {
-                "required_headers": ["Authorization"],
-                "fields": ["api_key"]
-            }
-        },
-        {
-            "name": "external_validator",
-            "enabled": true,
-            "stage": "pre_request",
-            "priority": 2,
-            "parallel": false,
-            "settings": {
-                "endpoint": "https://validator.example.com/check",
-                "timeout": "5s",
-                "fields": ["messages"]
             }
         }
     ]
@@ -154,7 +131,7 @@ curl -X POST -H "Host: tenant1.example.com" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-key" \
   -d '{
-    "model": "gpt-3.5-turbo",
+    "model": "gpt-4o-mini",
     "messages": [
         {"role": "user", "content": "Hello!"}
     ],

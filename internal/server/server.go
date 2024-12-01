@@ -60,7 +60,8 @@ func (s *Server) setupRoutes() {
 	// Admin API routes
 	admin := s.router.Group("/api/v1")
 	{
-		admin.GET("/forwarding-rules", s.getForwardingRules)
+		admin.GET("/forwarding-rules", s.listForwardingRules)
+		admin.GET("/forwarding-rules/:id", s.getForwardingRule)
 		admin.POST("/forwarding-rules", s.createForwardingRule)
 		admin.PUT("/forwarding-rules/:id", s.updateForwardingRule)
 		admin.DELETE("/forwarding-rules/:id", s.deleteForwardingRule)
@@ -76,7 +77,7 @@ func (s *Server) Run() error {
 }
 
 // Handler implementations
-func (s *Server) getForwardingRules(c *gin.Context) {
+func (s *Server) listForwardingRules(c *gin.Context) {
 	tenantID, exists := c.Get(middleware.TenantContextKey)
 	if !exists {
 		s.logger.Error("Tenant ID not found in context")
@@ -89,11 +90,16 @@ func (s *Server) getForwardingRules(c *gin.Context) {
 	rulesJSON, err := s.cache.Get(c, key)
 	if err != nil {
 		if err.Error() == "redis: nil" {
-			c.JSON(http.StatusOK, []rules.ForwardingRule{})
+			// No rules found, return empty array
+			c.JSON(http.StatusOK, gin.H{
+				"tenant_id": tenantID,
+				"rules":     []rules.ForwardingRule{},
+				"count":     0,
+			})
 			return
 		}
 		s.logger.WithError(err).Error("Failed to get forwarding rules")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get forwarding rules"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get rules"})
 		return
 	}
 
@@ -104,7 +110,59 @@ func (s *Server) getForwardingRules(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, forwardingRules)
+	// Log the rules for debugging
+	s.logger.WithFields(logrus.Fields{
+		"tenant_id":  tenantID,
+		"rule_count": len(forwardingRules),
+	}).Info("Retrieved forwarding rules")
+
+	// Return rules with metadata
+	c.JSON(http.StatusOK, gin.H{
+		"tenant_id": tenantID,
+		"rules":     forwardingRules,
+		"count":     len(forwardingRules),
+	})
+}
+
+func (s *Server) getForwardingRule(c *gin.Context) {
+	tenantID, exists := c.Get(middleware.TenantContextKey)
+	if !exists {
+		s.logger.Error("Tenant ID not found in context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+
+	ruleID := c.Param("id")
+
+	// Get rules from cache
+	key := fmt.Sprintf("rules:%s", tenantID)
+	rulesJSON, err := s.cache.Get(c, key)
+	if err != nil {
+		if err.Error() == "redis: nil" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Rule not found"})
+			return
+		}
+		s.logger.WithError(err).Error("Failed to get forwarding rules")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get rule"})
+		return
+	}
+
+	var forwardingRules []rules.ForwardingRule
+	if err := json.Unmarshal([]byte(rulesJSON), &forwardingRules); err != nil {
+		s.logger.WithError(err).Error("Failed to unmarshal rules")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse rules"})
+		return
+	}
+
+	// Find the specific rule
+	for _, rule := range forwardingRules {
+		if rule.ID == ruleID {
+			c.JSON(http.StatusOK, rule)
+			return
+		}
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{"error": "Rule not found"})
 }
 
 func (s *Server) createForwardingRule(c *gin.Context) {
@@ -121,13 +179,26 @@ func (s *Server) createForwardingRule(c *gin.Context) {
 		return
 	}
 
-	// Validate the request
-	if err := req.Validate(); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	// Get existing rules
+	key := fmt.Sprintf("rules:%s", tenantID)
+	var forwardingRules []rules.ForwardingRule
+
+	rulesJSON, err := s.cache.Get(c, key)
+	if err != nil && err.Error() != "redis: nil" {
+		s.logger.WithError(err).Error("Failed to get existing rules")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create rule"})
 		return
 	}
 
-	// Set default values
+	if rulesJSON != "" {
+		if err := json.Unmarshal([]byte(rulesJSON), &forwardingRules); err != nil {
+			s.logger.WithError(err).Error("Failed to unmarshal existing rules")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create rule"})
+			return
+		}
+	}
+
+	// Set default values for optional fields
 	stripPath := true
 	if req.StripPath != nil {
 		stripPath = *req.StripPath
@@ -144,7 +215,7 @@ func (s *Server) createForwardingRule(c *gin.Context) {
 	}
 
 	// Create new rule
-	rule := rules.ForwardingRule{
+	newRule := rules.ForwardingRule{
 		ID:            uuid.New().String(),
 		TenantID:      tenantID.(string),
 		Path:          req.Path,
@@ -154,30 +225,12 @@ func (s *Server) createForwardingRule(c *gin.Context) {
 		StripPath:     stripPath,
 		PreserveHost:  preserveHost,
 		RetryAttempts: retryAttempts,
+		PluginChain:   req.PluginChain,
 		Active:        true,
 	}
 
-	// Get existing rules
-	key := fmt.Sprintf("rules:%s", tenantID)
-	var forwardingRules []rules.ForwardingRule
-
-	rulesJSON, err := s.cache.Get(c, key)
-	if err != nil && err.Error() != "redis: nil" {
-		s.logger.WithError(err).Error("Failed to get existing rules")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create rule"})
-		return
-	}
-
-	if rulesJSON != "" {
-		if err := json.Unmarshal([]byte(rulesJSON), &forwardingRules); err != nil {
-			s.logger.WithError(err).Error("Failed to unmarshal rules")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create rule"})
-			return
-		}
-	}
-
-	// Add new rule
-	forwardingRules = append(forwardingRules, rule)
+	// Append new rule
+	forwardingRules = append(forwardingRules, newRule)
 
 	// Save updated rules
 	updatedJSON, err := json.Marshal(forwardingRules)
@@ -193,7 +246,13 @@ func (s *Server) createForwardingRule(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusCreated, rule)
+	s.logger.WithFields(logrus.Fields{
+		"tenant_id": tenantID,
+		"rule_id":   newRule.ID,
+		"path":      newRule.Path,
+	}).Info("Created new forwarding rule")
+
+	c.JSON(http.StatusCreated, newRule)
 }
 
 func (s *Server) updateForwardingRule(c *gin.Context) {
