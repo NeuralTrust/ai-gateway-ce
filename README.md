@@ -1,65 +1,102 @@
-## Running the Gateway
+# AI Gateway
 
-```bash
-Start Redis (required)
-redis-server
-Run the gateway
-go run cmd/gateway/main.go
+A multi-tenant API Gateway designed to forward and manage API requests with support for multiple backends, AI model providers, and a powerful plugin system.
+
+## Features
+
+- Multi-tenant support via subdomains
+- Dynamic forwarding rules
+- Plugin system with parallel execution support
+- Custom headers and authentication
+- Path rewriting
+- Request retry mechanism
+- Redis-based rule storage
+- Health checks
+
+## Plugin System
+
+The gateway includes a powerful plugin system that allows for request/response modification and validation. Plugins can be executed in parallel and can access specific fields of the request.
+
+### Available Plugins
+
+#### 1. Content Validator
+Validates request content type and size.
+
+```json
+{
+  "name": "content_validator",
+  "enabled": true,
+  "stage": "pre_request",
+  "priority": 1,
+  "parallel": true,
+  "settings": {
+    "allowed_types": ["application/json"],
+    "max_size": 1048576,
+    "fields": ["messages", "model"] // Optional: specific fields to validate
+  }
+} 
 ```
 
-## API Examples
+#### 2. Security Validator
+Validates headers and IP addresses.
 
-### 1. Managing Forwarding Rules
-
-#### Create a Rule
-
-```bash
-curl -X POST -H "Host: tenant1.example.com" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "path": "/v1/chat",
-    "target": "https://api.openai.com",
-    "methods": ["POST"],
-    "headers": {
-      "Authorization": "Bearer your-api-key-here"
-    },
-    "strip_path": false
-  }' \
-  http://localhost:8080/api/v1/forwarding-rules
+```json
+{
+    "name": "security_validator",
+    "enabled": true,
+    "stage": "pre_request",
+    "priority": 1,
+    "parallel": true,
+    "settings": {
+        "required_headers": ["Authorization", "X-Request-ID"],
+        "blocked_ips": ["192.168.1.100"],
+        "fields": ["api_key", "user_id"]  // Optional: specific fields to validate
+    }
+}
 ```
 
-#### List Rules
+#### 3. External Validator
+Forwards request data to an external validation service.
 
-```bash
-curl -H "Host: tenant1.example.com" \
-  http://localhost:8080/api/v1/forwarding-rules
+```json
+{
+    "name": "external_validator",
+    "enabled": true,
+    "stage": "pre_request",
+    "priority": 1,
+    "parallel": true,
+    "settings": {
+        "endpoint": "https://your-validator-api.com/validate",
+        "auth_header": "Bearer your-validator-api-key",
+        "timeout": "5s",
+        "retry_count": 2,
+        "fields": ["messages", "model"]  // Optional: specific fields to validate
+    }
+}
 ```
 
-#### Update a Rule
+### Plugin Configuration Options
+
+- `name`: Plugin identifier
+- `enabled`: Enable/disable the plugin
+- `stage`: Execution stage (pre_request, post_request, pre_response, post_response)
+- `priority`: Execution order (lower numbers run first)
+- `parallel`: Whether the plugin can run in parallel with others
+- `settings`: Plugin-specific configuration
+- `fields`: Specific fields to process (optional)
+
+### Plugin Execution Stages
+
+1. `pre_request`: Before forwarding the request
+2. `post_request`: After preparing the forward request but before sending
+3. `pre_response`: After receiving the response but before processing
+4. `post_response`: Before sending the response back to the client
+
+## Example Usage
+
+### Creating a Forwarding Rule with Multiple Plugins
 
 ```bash
-curl -X PUT -H "Host: tenant1.example.com" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "target": "https://api.anthropic.com",
-    "active": true
-  }' \
-  http://localhost:8080/api/v1/forwarding-rules/{rule_id}
-```
-
-#### Delete a Rule
-
-```bash
-curl -X DELETE -H "Host: tenant1.example.com" \
-  http://localhost:8080/api/v1/forwarding-rules/{rule_id}
-```
-
-### 2. Example Use Cases
-
-#### AI Model Provider Forwarding
-
-```bash
-# Create OpenAI forwarding rule
 curl -X POST -H "Host: tenant1.example.com" \
   -H "Content-Type: application/json" \
   -d '{
@@ -67,74 +104,97 @@ curl -X POST -H "Host: tenant1.example.com" \
     "target": "https://api.openai.com",
     "methods": ["POST"],
     "headers": {
-      "Authorization": "Bearer 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"
+      "Authorization": "Bearer your-api-key"
     },
-    "strip_path": false
+    "plugin_chain": [
+        {
+            "name": "content_validator",
+            "enabled": true,
+            "stage": "pre_request",
+            "priority": 1,
+            "parallel": true,
+            "settings": {
+                "allowed_types": ["application/json"],
+                "max_size": 1048576,
+                "fields": ["messages", "model"]
+            }
+        },
+        {
+            "name": "security_validator",
+            "enabled": true,
+            "stage": "pre_request",
+            "priority": 1,
+            "parallel": true,
+            "settings": {
+                "required_headers": ["Authorization"],
+                "fields": ["api_key"]
+            }
+        },
+        {
+            "name": "external_validator",
+            "enabled": true,
+            "stage": "pre_request",
+            "priority": 2,
+            "parallel": false,
+            "settings": {
+                "endpoint": "https://validator.example.com/check",
+                "timeout": "5s",
+                "fields": ["messages"]
+            }
+        }
+    ]
   }' \
   http://localhost:8080/api/v1/forwarding-rules
+```
 
-# Use the forwarding rule
+### Testing the Rule
+
+```bash
 curl -X POST -H "Host: tenant1.example.com" \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-key" \
   -d '{
-    "model": "gpt-4o-mini",
-    "messages": [{"role": "user", "content": "Hello!"}]
+    "model": "gpt-3.5-turbo",
+    "messages": [
+        {"role": "user", "content": "Hello!"}
+    ],
+    "temperature": 0.7
   }' \
   http://localhost:8080/v1/chat/completions
 ```
 
-#### Generic API Forwarding
+## Plugin Development
 
-```bash
-# Create weather API forwarding rule
-curl -X POST -H "Host: tenant1.example.com" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "path": "/api/weather",
-    "target": "https://api.weatherapi.com/v1",
-    "methods": ["GET"],
-    "headers": {
-      "key": "your-weather-api-key"
-    },
-    "strip_path": true
-  }' \
-  http://localhost:8080/api/v1/forwarding-rules
+Plugins must implement the Plugin interface:
 
-# Use the forwarding rule
-curl -H "Host: tenant1.example.com" \
-  http://localhost:8080/api/weather/current.json?q=London
+```go
+type Plugin interface {
+    Name() string
+    Priority() int
+    Stage() ExecutionStage
+    Parallel() bool
+    ProcessRequest(ctx context.Context, reqCtx *RequestContext) error
+    ProcessResponse(ctx context.Context, respCtx *ResponseContext) error
+}
 ```
 
-#### Internal Service Forwarding
+See the existing plugins in `internal/plugins/` for implementation examples.
 
-```bash
-# Create internal service forwarding rule
-curl -X POST -H "Host: tenant1.example.com" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "path": "/internal/users",
-    "target": "http://user-service:8080/users",
-    "methods": ["GET", "POST", "PUT", "DELETE"],
-    "preserve_host": true,
-    "retry_attempts": 3
-  }' \
-  http://localhost:8080/api/v1/forwarding-rules
+## Configuration
 
-# Use the forwarding rule
-curl -H "Host: tenant1.example.com" \
-  http://localhost:8080/internal/users
+Create a `config.yaml` file:
+
+```yaml
+server:
+  port: 8080
+  base_domain: "example.com"
+
+redis:
+  host: "localhost"
+  port: 6379
+  password: ""
+  db: 0
 ```
-
-## Forwarding Rule Options
-
-- `path`: Base path to match (required)
-- `target`: Target URL to forward requests to (required)
-- `methods`: Array of allowed HTTP methods
-- `headers`: Map of headers to add to forwarded requests
-- `strip_path`: Remove the base path when forwarding (default: true)
-- `preserve_host`: Keep original host header (default: false)
-- `retry_attempts`: Number of retry attempts (default: 0)
-- `active`: Enable/disable the rule (default: true)
 
 ## Development
 
@@ -153,23 +213,14 @@ curl -H "Host: tenant1.example.com" \
 ├── internal/
 │   ├── cache/           # Redis cache implementation
 │   ├── middleware/      # HTTP middleware
-│   ├── models/          # Data models
+│   ├── plugins/         # Plugin implementations
 │   ├── proxy/           # Request forwarding logic
+│   ├── rules/           # Forwarding rules
 │   └── server/          # HTTP server implementation
 ├── pkg/
 │   └── utils/           # Shared utilities
 ├── config.yaml          # Configuration file
 └── go.mod              # Go module file
-```
-
-### Testing
-
-```bash
-# Run all tests
-go test ./...
-
-# Test specific package
-go test ./internal/proxy
 ```
 
 ## License
