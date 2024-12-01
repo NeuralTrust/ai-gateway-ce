@@ -103,6 +103,7 @@ curl -X POST -H "Host: tenant1.example.com" \
     "path": "/v1/chat/completions",
     "target": "https://api.openai.com",
     "methods": ["POST"],
+    "strip_path": false,
     "headers": {
       "Authorization": "Bearer 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"
     },
@@ -112,7 +113,6 @@ curl -X POST -H "Host: tenant1.example.com" \
             "enabled": true,
             "stage": "pre_request",
             "priority": 1,
-            "parallel": true,
             "settings": {
                 "allowed_types": ["application/json"],
                 "max_size": 1048576,
@@ -199,3 +199,196 @@ redis:
 ├── config.yaml          # Configuration file
 └── go.mod              # Go module file
 ```
+
+## Rate Limiting Options
+
+The gateway supports advanced rate limiting configurations through the rate_limiter plugin.
+
+### 1. Tiered Rate Limiting
+
+Configure different rate limits for different service tiers:
+
+```json
+{
+  "name": "rate_limiter",
+  "enabled": true,
+  "stage": "pre_request",
+  "priority": 1,
+  "parallel": true,
+  "settings": {
+    "tiers": {
+      "tier1": {
+        "limit": 100,
+        "duration": "1m"
+      },
+      "tier2": {
+        "limit": 200,
+        "duration": "1m"
+      }
+    },
+    "default_tier": "tier1",
+    "limit_types": ["requests", "bandwidth"],
+    "dynamic": true,
+    "quota": 1000,
+    "actions": {
+      "tier1": {
+        "requests": 100,
+        "bandwidth": 1048576
+      },
+      "tier2": {
+        "requests": 200,
+        "bandwidth": 2097152
+      }
+    }
+  }
+}
+```
+
+### 2. Rate Limit Types
+
+Different types of rate limiting strategies:
+
+```json
+{
+    "limit_types": {
+        "global": false,
+        "per_ip": true,
+        "per_user": true,
+        "per_method": true,
+        "cost_based": true
+    },
+    "endpoint_costs": {
+        "/v1/chat/completions": 2,
+        "/v1/embeddings": 1,
+        "/v1/moderations": 0.5
+    }
+}
+```
+
+### 3. Dynamic Rate Limiting
+
+Automatically adjust rate limits based on system load:
+
+```json
+{
+    "dynamic": {
+        "auto_scale": true,
+        "concurrency_max": 100,
+        "error_threshold": 0.05,
+        "load_factor": 0.75
+    }
+}
+```
+
+### 4. Quota Management
+
+Manage long-term usage quotas:
+
+```json
+{
+    "quota": {
+        "daily": 1000,
+        "monthly": 25000,
+        "rollover": true,
+        "reset_time": "00:00 UTC"
+    }
+}
+```
+
+### 5. Rate Limit Actions
+
+Configure actions when limits are exceeded:
+
+```json
+{
+    "actions": {
+        "on_exceeded": "degrade",
+        "retry_after": "60s",
+        "fallback_service": "https://backup-api.example.com",
+        "alert_threshold": 80,
+        "notification_webhook": "https://alerts.example.com/webhook"
+    }
+}
+```
+
+### Example Usage
+
+Create a forwarding rule with rate limiting:
+
+```bash
+curl -X POST -H "Host: tenant1.example.com" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/v1/chat/completions",
+    "target": "https://api.openai.com",
+    "plugin_chain": [
+        {
+            "name": "rate_limiter",
+            "enabled": true,
+            "settings": {
+                "tiers": {
+                    "enterprise": {
+                        "limit": 1000,
+                        "window": "1h",
+                        "burst": 50
+                    }
+                },
+                "default_tier": "enterprise",
+                "limit_types": {
+                    "per_ip": true,
+                    "cost_based": true
+                },
+                "endpoint_costs": {
+                    "/v1/chat/completions": 2
+                },
+                "dynamic": {
+                    "auto_scale": true,
+                    "concurrency_max": 100
+                },
+                "quota": {
+                    "daily": 10000,
+                    "monthly": 250000
+                },
+                "actions": {
+                    "on_exceeded": "degrade",
+                    "fallback_service": "https://backup-api.example.com"
+                }
+            }
+        }
+    ]
+  }' \
+  http://localhost:8080/api/v1/forwarding-rules
+```
+
+### Rate Limiting Features
+
+1. **Tiered Rate Limiting**
+   - Different limits for different service tiers
+   - Burst allowance for handling spikes
+   - Configurable time windows
+
+2. **Rate Limit Types**
+   - Global limits across all endpoints
+   - Per-IP address limiting
+   - Per-user limiting
+   - Method-specific limits
+   - Cost-based limiting for different endpoints
+
+3. **Dynamic Rate Limiting**
+   - Auto-scaling based on system load
+   - Concurrency control
+   - Error rate monitoring
+   - Load-based adjustments
+
+4. **Quota Management**
+   - Daily and monthly quotas
+   - Quota rollover options
+   - Configurable reset times
+   - Usage tracking
+
+5. **Rate Limit Actions**
+   - Multiple action types (block, delay, degrade)
+   - Retry-After header support
+   - Fallback service configuration
+   - Alert thresholds
+   - Webhook notifications
