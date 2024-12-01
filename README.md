@@ -105,7 +105,7 @@ curl -X POST -H "Host: tenant1.example.com" \
     "methods": ["POST"],
     "strip_path": false,
     "headers": {
-      "Authorization": "Bearer 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"
+      "Authorization": "Bearer api-key"
     },
     "plugin_chain": [
         {
