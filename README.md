@@ -222,18 +222,3 @@ redis:
 ├── config.yaml          # Configuration file
 └── go.mod              # Go module file
 ```
-
-## License
-
-MIT
-```
-
-This README provides:
-1. Overview of the gateway features
-2. Configuration instructions
-3. Detailed API examples
-4. Different use cases
-5. Development setup
-6. Project structure
-
-Would you like me to add any additional sections or examples?
