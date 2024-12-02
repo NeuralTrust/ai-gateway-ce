@@ -110,25 +110,32 @@ func (p *Proxy) forwardRequest(c *gin.Context, rule *rules.ForwardingRule) error
 		return fmt.Errorf("invalid target URL: %w", err)
 	}
 
+	// Get tenant configuration for API key
+	tenantID, _ := c.Get(middleware.TenantContextKey)
+	key := fmt.Sprintf("tenant:%s", tenantID)
+	tenantJSON, err := p.cache.Get(c, key)
+	if err != nil {
+		p.logger.WithError(err).Error("Failed to get tenant")
+		return fmt.Errorf("failed to authenticate request")
+	}
+
+	var tenant struct {
+		ApiKey string `json:"api_key"`
+		Status string `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(tenantJSON), &tenant); err != nil {
+		p.logger.WithError(err).Error("Failed to unmarshal tenant")
+		return fmt.Errorf("failed to authenticate request")
+	}
+
 	// Build the target path
 	targetPath := c.Request.URL.Path
 	if rule.StripPath {
 		targetPath = strings.TrimPrefix(targetPath, rule.Path)
 	}
+	targetURL.Path = path.Join(targetURL.Path, targetPath)
 
-	// Ensure we have the complete path
-	fullPath := path.Join(targetURL.Path, targetPath)
-	if !strings.HasSuffix(c.Request.URL.Path, "/") && strings.HasSuffix(targetPath, "/") {
-		fullPath += "/"
-	}
-	targetURL.Path = fullPath
-
-	// Add query parameters if any
-	if c.Request.URL.RawQuery != "" {
-		targetURL.RawQuery = c.Request.URL.RawQuery
-	}
-
-	// Read the original body
+	// Read and store the original body
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		p.logger.WithError(err).Error("Failed to read request body")
@@ -159,6 +166,11 @@ func (p *Proxy) forwardRequest(c *gin.Context, rule *rules.ForwardingRule) error
 	// Add custom headers from rule
 	for k, v := range rule.Headers {
 		forwardReq.Header.Set(k, v)
+	}
+
+	// Add tenant API key to Authorization header if not present
+	if forwardReq.Header.Get("Authorization") == "" {
+		forwardReq.Header.Set("Authorization", fmt.Sprintf("Bearer %s", tenant.ApiKey))
 	}
 
 	// Set proper Host header
@@ -247,6 +259,24 @@ func (p *Proxy) forwardRequest(c *gin.Context, rule *rules.ForwardingRule) error
 	if err != nil {
 		p.logger.WithError(err).Error("Failed to write response")
 		return fmt.Errorf("failed to write response: %w", err)
+	}
+
+	// Execute plugins based on stage
+	for _, pluginConfig := range rule.PluginChain {
+		if !pluginConfig.Enabled {
+			continue
+		}
+
+		switch pluginConfig.Stage {
+		case rules.StagePreRequest:
+			// Pre-request plugin execution
+		case rules.StagePostRequest:
+			// Post-request plugin execution
+		case rules.StagePreResponse:
+			// Pre-response plugin execution
+		case rules.StagePostResponse:
+			// Post-response plugin execution
+		}
 	}
 
 	return nil

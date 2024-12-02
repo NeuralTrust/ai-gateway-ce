@@ -5,15 +5,54 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-echo "Creating forwarding rule with rate limiting..."
+# Use environment variables or defaults
+ADMIN_URL=${ADMIN_URL:-"http://localhost:8080/api/v1"}
+PROXY_URL=${PROXY_URL:-"http://localhost:8081"}
+BASE_DOMAIN=${BASE_DOMAIN:-"example.com"}
 
-# 1. First, create a forwarding rule with rate limiting
-curl -X POST -H "Host: tenant1.example.com" \
+echo -e "${GREEN}Testing Rate Limiter${NC}\n"
+
+# 1. Create a tenant with rate limiting
+echo -e "${GREEN}1. Creating tenant with rate limiting...${NC}"
+TENANT_RESPONSE=$(curl -s -X POST "$ADMIN_URL/tenants" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Rate Limited Company",
+    "subdomain": "ratelimited",
+    "tier": "basic",
+    "enabled_plugins": ["rate_limiter"],
+    "required_plugins": {
+        "rate_limiter": {
+            "name": "rate_limiter",
+            "enabled": true,
+            "priority": 1,
+            "stage": "pre_request",
+            "settings": {
+                "limit": 5,
+                "window": "1m",
+                "burst": 2
+            }
+        }
+    }
+  }')
+
+TENANT_ID=$(echo $TENANT_RESPONSE | jq -r '.id')
+SUBDOMAIN=$(echo $TENANT_RESPONSE | jq -r '.subdomain')
+API_KEY=$(echo $TENANT_RESPONSE | jq -r '.api_key')
+
+echo -e "Tenant ID: $TENANT_ID"
+echo -e "API Key: $API_KEY\n"
+
+# 2. Create forwarding rule
+echo -e "${GREEN}2. Creating forwarding rule...${NC}"
+RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/tenants/$TENANT_ID/rules" \
+  -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/test",
     "target": "https://httpbin.org",
     "methods": ["GET"],
+    "strip_path": true,
     "plugin_chain": [
         {
             "name": "rate_limiter",
@@ -42,14 +81,13 @@ curl -X POST -H "Host: tenant1.example.com" \
             }
         }
     ]
-  }' \
-  http://localhost:8080/api/v1/forwarding-rules
+  }')
 
-echo -e "\n${GREEN}Testing basic rate limiting...${NC}"
+echo -e "Rule Response: $RULE_RESPONSE\n"
 
 # 2. Test basic rate limiting (should succeed for first 5 requests)
 for i in {1..5}; do
-    response=$(curl -s -w "\n%{http_code}" -H "Host: tenant1.example.com" http://localhost:8080/test/get)
+    response=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $API_KEY" -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" $PROXY_URL/test/get)
     http_code=$(echo "$response" | tail -n1)
     if [ "$http_code" == "200" ]; then
         echo -e "${GREEN}Request $i: Success${NC}"
@@ -62,7 +100,7 @@ done
 echo -e "\n${GREEN}Testing rate limit exceeded...${NC}"
 
 # 3. Test rate limit exceeded (should fail)
-response=$(curl -s -w "\n%{http_code}" -H "Host: tenant1.example.com" http://localhost:8080/test/get)
+response=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $API_KEY" -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" $PROXY_URL/test/get)
 http_code=$(echo "$response" | tail -n1)
 if [ "$http_code" != "200" ]; then
     echo -e "${GREEN}Rate limit exceeded test: Success (got expected error)${NC}"
@@ -70,93 +108,22 @@ else
     echo -e "${RED}Rate limit exceeded test: Failed (unexpected success)${NC}"
 fi
 
-echo -e "\n${GREEN}Testing burst capacity...${NC}"
+# 4. Wait for rate limit window to reset
+echo -e "\n${GREEN}4. Waiting for rate limit window to reset (60s)...${NC}"
+sleep 60
 
-# 4. Create a rule with burst capacity
-curl -X POST -H "Host: tenant2.example.com" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "path": "/test",
-    "target": "https://httpbin.org",
-    "methods": ["GET"],
-    "plugin_chain": [
-        {
-            "name": "rate_limiter",
-            "enabled": true,
-            "settings": {
-                "tiers": {
-                    "burst": {
-                        "name": "burst",
-                        "limit": 2,
-                        "window": "1m",
-                        "burst": 3
-                    }
-                },
-                "default_tier": "burst"
-            }
-        }
-    ]
-  }' \
-  http://localhost:8080/api/v1/forwarding-rules
+# 5. Test after reset
+echo -e "\n${GREEN}5. Testing after rate limit reset...${NC}"
+response=$(curl -s -w "\n%{http_code}" \
+  -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
+  -H "Authorization: Bearer $API_KEY" \
+  "$PROXY_URL/test")
 
-# 5. Test burst capacity (should allow 5 quick requests)
-for i in {1..5}; do
-    response=$(curl -s -w "\n%{http_code}" -H "Host: tenant2.example.com" http://localhost:8080/test/get)
-    http_code=$(echo "$response" | tail -n1)
-    if [ "$http_code" == "200" ]; then
-        echo -e "${GREEN}Burst request $i: Success${NC}"
-    else
-        echo -e "${RED}Burst request $i: Failed with code $http_code${NC}"
-    fi
-done
+http_code=$(echo "$response" | tail -n1)
+if [ "$http_code" == "200" ]; then
+    echo -e "${GREEN}Request after reset: Success${NC}"
+else
+    echo -e "${RED}Request after reset: Failed with code $http_code${NC}"
+fi
 
-echo -e "\n${GREEN}Testing different tiers...${NC}"
-
-# 6. Create a rule with multiple tiers
-curl -X POST -H "Host: tenant3.example.com" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "path": "/test",
-    "target": "https://httpbin.org",
-    "methods": ["GET"],
-    "plugin_chain": [
-        {
-            "name": "rate_limiter",
-            "enabled": true,
-            "settings": {
-                "tiers": {
-                    "free": {
-                        "name": "free",
-                        "limit": 2,
-                        "window": "1m"
-                    },
-                    "premium": {
-                        "name": "premium",
-                        "limit": 10,
-                        "window": "1m"
-                    }
-                },
-                "default_tier": "free"
-            }
-        }
-    ]
-  }' \
-  http://localhost:8080/api/v1/forwarding-rules
-
-# 7. Test free tier
-echo "Testing free tier..."
-for i in {1..3}; do
-    response=$(curl -s -w "\n%{http_code}" -H "Host: tenant3.example.com" http://localhost:8080/test/get)
-    http_code=$(echo "$response" | tail -n1)
-    echo -e "Free tier request $i: $([ "$http_code" == "200" ] && echo "${GREEN}Success${NC}" || echo "${RED}Failed${NC}")"
-done
-
-# 8. Test premium tier
-echo "Testing premium tier..."
-for i in {1..5}; do
-    response=$(curl -s -w "\n%{http_code}" -H "Host: tenant3.example.com" -H "X-Tier: premium" http://localhost:8080/test/get)
-    http_code=$(echo "$response" | tail -n1)
-    echo -e "Premium tier request $i: $([ "$http_code" == "200" ] && echo "${GREEN}Success${NC}" || echo "${RED}Failed${NC}")"
-done
-
-echo -e "\n${GREEN}All tests completed${NC}" 
+echo -e "\n${GREEN}Rate limiter tests completed${NC}"

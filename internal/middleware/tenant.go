@@ -1,25 +1,68 @@
 package middleware
 
 import (
+	"ai-gateway/internal/cache"
+	"fmt"
+	"strings"
+
 	"github.com/gin-gonic/gin"
-	"ai-gateway/pkg/utils"
+	"github.com/sirupsen/logrus"
 )
 
-const TenantContextKey = "tenant_id"
+type TenantMiddleware struct {
+	logger     *logrus.Logger
+	cache      *cache.Cache
+	baseDomain string
+}
 
-func TenantIdentification(baseDomain string) gin.HandlerFunc {
+func NewTenantMiddleware(logger *logrus.Logger, cache *cache.Cache, baseDomain string) *TenantMiddleware {
+	return &TenantMiddleware{
+		logger:     logger,
+		cache:      cache,
+		baseDomain: baseDomain,
+	}
+}
+
+func (m *TenantMiddleware) IdentifyTenant() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		host := c.Request.Host
-		tenantID := utils.ExtractTenantFromSubdomain(host, baseDomain)
+		subdomain := m.extractSubdomain(host)
 
-		if tenantID == "" {
+		if subdomain == "" {
+			m.logger.WithField("host", host).Error("Failed to extract subdomain")
 			c.JSON(400, gin.H{"error": "Invalid tenant identifier"})
 			c.Abort()
 			return
 		}
 
-		// Store tenant ID in context for downstream handlers
+		// Get tenant ID from subdomain mapping
+		key := fmt.Sprintf("subdomain:%s", subdomain)
+		tenantID, err := m.cache.Get(c, key)
+		if err != nil {
+			m.logger.WithError(err).Error("Failed to get tenant ID")
+			c.JSON(400, gin.H{"error": "Invalid tenant identifier"})
+			c.Abort()
+			return
+		}
+
 		c.Set(TenantContextKey, tenantID)
 		c.Next()
 	}
-} 
+}
+
+func (m *TenantMiddleware) extractSubdomain(host string) string {
+	if colonIndex := strings.Index(host, ":"); colonIndex != -1 {
+		host = host[:colonIndex]
+	}
+
+	if !strings.HasSuffix(host, m.baseDomain) {
+		return ""
+	}
+
+	subdomain := strings.TrimSuffix(host, "."+m.baseDomain)
+	if subdomain == "" {
+		return ""
+	}
+
+	return subdomain
+}

@@ -3,28 +3,35 @@ package main
 import (
 	"log"
 	"os"
-	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 
 	"ai-gateway/internal/cache"
-	"ai-gateway/internal/plugins"
-	"ai-gateway/internal/plugins/external"
 	"ai-gateway/internal/server"
 )
+
+type Config struct {
+	Server struct {
+		AdminPort  int    `mapstructure:"admin_port"`
+		ProxyPort  int    `mapstructure:"proxy_port"`
+		BaseDomain string `mapstructure:"base_domain"`
+	} `mapstructure:"server"`
+	Redis struct {
+		Host     string `mapstructure:"host"`
+		Port     int    `mapstructure:"port"`
+		Password string `mapstructure:"password"`
+		DB       int    `mapstructure:"db"`
+	} `mapstructure:"redis"`
+}
 
 func main() {
 	// Initialize logger
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
 
-	// Set log level from config or environment
-	logLevel := os.Getenv("LOG_LEVEL")
-	if logLevel == "debug" {
+	if os.Getenv("LOG_LEVEL") == "debug" {
 		logger.SetLevel(logrus.DebugLevel)
-	} else {
-		logger.SetLevel(logrus.InfoLevel)
 	}
 
 	// Load configuration
@@ -33,39 +40,46 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Initialize cache with proper config conversion
-	cacheConfig := cache.Config{
+	// Initialize cache
+	cache, err := cache.NewCache(cache.Config{
 		Host:     config.Redis.Host,
 		Port:     config.Redis.Port,
 		Password: config.Redis.Password,
 		DB:       config.Redis.DB,
-	}
-
-	cache, err := cache.NewCache(cacheConfig)
+	})
 	if err != nil {
 		log.Fatalf("Failed to initialize cache: %v", err)
 	}
 
-	// Initialize plugin registry
-	pluginManager := plugins.NewRegistry()
+	// Determine server type from command line
+	serverType := "proxy"
+	if len(os.Args) > 1 {
+		serverType = os.Args[1]
+	}
 
-	// Initialize external validator plugin
-	externalValidator := external.NewExternalValidator(external.Config{
-		Endpoint:   "https://your-validation-api.com/validate",
-		AuthHeader: "Bearer your-api-key",
-		Timeout:    5 * time.Second,
-		RetryCount: 2,
-	}, logger)
-	pluginManager.Register(externalValidator)
+	switch serverType {
+	case "admin":
+		srv := server.NewAdminServer(&server.Config{
+			AdminPort:  config.Server.AdminPort,
+			BaseDomain: config.Server.BaseDomain,
+		}, cache, logger)
 
-	// Create and start server
-	srv := server.NewServer(&server.Config{
-		Port:       config.Server.Port,
-		BaseDomain: config.Server.BaseDomain,
-	}, cache, logger, pluginManager)
+		if err := srv.Run(); err != nil {
+			log.Fatalf("Failed to start admin server: %v", err)
+		}
 
-	if err := srv.Run(); err != nil {
-		log.Fatalf("Failed to start server: %v", err)
+	case "proxy":
+		srv := server.NewProxyServer(&server.Config{
+			ProxyPort:  config.Server.ProxyPort,
+			BaseDomain: config.Server.BaseDomain,
+		}, cache, logger)
+
+		if err := srv.Run(); err != nil {
+			log.Fatalf("Failed to start proxy server: %v", err)
+		}
+
+	default:
+		log.Fatalf("Unknown server type: %s", serverType)
 	}
 }
 
@@ -85,17 +99,4 @@ func loadConfig() (*Config, error) {
 	}
 
 	return &config, nil
-}
-
-type Config struct {
-	Server struct {
-		Port       int    `mapstructure:"port"`
-		BaseDomain string `mapstructure:"base_domain"`
-	} `mapstructure:"server"`
-	Redis struct {
-		Host     string `mapstructure:"host"`
-		Port     int    `mapstructure:"port"`
-		Password string `mapstructure:"password"`
-		DB       int    `mapstructure:"db"`
-	} `mapstructure:"redis"`
 }

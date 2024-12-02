@@ -16,6 +16,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"ai-gateway/internal/plugins"
+	"ai-gateway/internal/rules"
 )
 
 type RateLimiter struct {
@@ -107,7 +108,7 @@ func NewRateLimiter(config Config, logger *logrus.Logger) (*RateLimiter, error) 
 }
 
 func (r *RateLimiter) Name() string {
-	return "rate_limiter"
+	return rules.PluginRateLimiter
 }
 
 func (r *RateLimiter) Priority() int {

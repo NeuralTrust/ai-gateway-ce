@@ -1,9 +1,7 @@
 package rules
 
 import (
-	"fmt"
-	"net/url"
-	"strings"
+	"time"
 )
 
 type ForwardingRule struct {
@@ -18,15 +16,8 @@ type ForwardingRule struct {
 	PreserveHost  bool              `json:"preserve_host"`
 	RetryAttempts int               `json:"retry_attempts,omitempty"`
 	PluginChain   []PluginConfig    `json:"plugin_chain,omitempty"`
-}
-
-type PluginConfig struct {
-	Name     string                 `json:"name"`
-	Enabled  bool                   `json:"enabled"`
-	Stage    string                 `json:"stage"`    // pre_request, post_request, pre_response, post_response
-	Priority int                    `json:"priority"` // Lower numbers run first
-	Parallel bool                   `json:"parallel"` // Can run in parallel with other plugins
-	Settings map[string]interface{} `json:"settings"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
 }
 
 type CreateRequest struct {
@@ -50,74 +41,4 @@ type UpdateRequest struct {
 	PreserveHost  *bool             `json:"preserve_host,omitempty"`
 	RetryAttempts *int              `json:"retry_attempts,omitempty"`
 	PluginChain   []PluginConfig    `json:"plugin_chain,omitempty"`
-}
-
-func (r *CreateRequest) Validate() error {
-	// Validate path
-	if !strings.HasPrefix(r.Path, "/") {
-		return fmt.Errorf("path must start with /")
-	}
-
-	// Validate target URL
-	targetURL, err := url.Parse(r.Target)
-	if err != nil {
-		return fmt.Errorf("invalid target URL: %w", err)
-	}
-	if !targetURL.IsAbs() {
-		return fmt.Errorf("target must be an absolute URL")
-	}
-
-	// Validate methods
-	if len(r.Methods) > 0 {
-		validMethods := map[string]bool{
-			"GET": true, "POST": true, "PUT": true, "DELETE": true,
-			"PATCH": true, "HEAD": true, "OPTIONS": true,
-		}
-		for _, method := range r.Methods {
-			if !validMethods[strings.ToUpper(method)] {
-				return fmt.Errorf("invalid HTTP method: %s", method)
-			}
-		}
-	}
-
-	// Validate retry attempts
-	if r.RetryAttempts != nil && *r.RetryAttempts < 0 {
-		return fmt.Errorf("retry attempts must be non-negative")
-	}
-
-	return nil
-}
-
-func (r *UpdateRequest) Validate() error {
-	if r.Path != "" && !strings.HasPrefix(r.Path, "/") {
-		return fmt.Errorf("path must start with /")
-	}
-
-	if r.Target != "" {
-		targetURL, err := url.Parse(r.Target)
-		if err != nil {
-			return fmt.Errorf("invalid target URL: %w", err)
-		}
-		if !targetURL.IsAbs() {
-			return fmt.Errorf("target must be an absolute URL")
-		}
-	}
-
-	if len(r.Methods) > 0 {
-		validMethods := map[string]bool{
-			"GET": true, "POST": true, "PUT": true, "DELETE": true,
-			"PATCH": true, "HEAD": true, "OPTIONS": true,
-		}
-		for _, method := range r.Methods {
-			if !validMethods[strings.ToUpper(method)] {
-				return fmt.Errorf("invalid HTTP method: %s", method)
-			}
-		}
-	}
-
-	if r.RetryAttempts != nil && *r.RetryAttempts < 0 {
-		return fmt.Errorf("retry attempts must be non-negative")
-	}
-
-	return nil
 }
