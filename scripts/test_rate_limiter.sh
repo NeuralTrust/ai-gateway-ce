@@ -20,20 +20,7 @@ TENANT_RESPONSE=$(curl -s -X POST "$ADMIN_URL/tenants" \
     "name": "Rate Limited Company",
     "subdomain": "ratelimited",
     "tier": "basic",
-    "enabled_plugins": ["rate_limiter"],
-    "required_plugins": {
-        "rate_limiter": {
-            "name": "rate_limiter",
-            "enabled": true,
-            "priority": 1,
-            "stage": "pre_request",
-            "settings": {
-                "limit": 5,
-                "window": "1m",
-                "burst": 2
-            }
-        }
-    }
+    "enabled_plugins": ["rate_limiter"]
   }')
 
 TENANT_ID=$(echo $TENANT_RESPONSE | jq -r '.id')
@@ -52,6 +39,9 @@ RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/tenants/$TENANT_ID/rules" \
     "path": "/test",
     "target": "https://httpbin.org",
     "methods": ["GET"],
+    "headers": {
+        "X-Rate-Limit-Tier": "premium"
+    },
     "strip_path": true,
     "plugin_chain": [
         {
@@ -64,6 +54,12 @@ RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/tenants/$TENANT_ID/rules" \
                         "limit": 5,
                         "window": "1m",
                         "burst": 2
+                    },
+                    "premium": {
+                        "name": "premium",
+                        "limit": 10,
+                        "window": "1m",
+                        "burst": 3
                     }
                 },
                 "default_tier": "basic",
@@ -73,10 +69,6 @@ RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/tenants/$TENANT_ID/rules" \
                 },
                 "quota": {
                     "daily": 100
-                },
-                "actions": {
-                    "on_exceeded": "block",
-                    "retry_after": "60s"
                 }
             }
         }
@@ -100,7 +92,8 @@ done
 echo -e "\n${GREEN}Testing rate limit exceeded...${NC}"
 
 # 3. Test rate limit exceeded (should fail)
-response=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $API_KEY" -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" $PROXY_URL/test/get)
+response=$(curl -s -w "\n%{http_code}" -H "Authorization: Bearer $API_KEY" -H "X-Rate-Limit-Tier: basic" -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" $PROXY_URL/test/get)
+echo $response
 http_code=$(echo "$response" | tail -n1)
 if [ "$http_code" != "200" ]; then
     echo -e "${GREEN}Rate limit exceeded test: Success (got expected error)${NC}"
@@ -117,6 +110,7 @@ echo -e "\n${GREEN}5. Testing after rate limit reset...${NC}"
 response=$(curl -s -w "\n%{http_code}" \
   -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
   -H "Authorization: Bearer $API_KEY" \
+  -H "X-Rate-Limit-Tier: basic" \
   "$PROXY_URL/test")
 
 http_code=$(echo "$response" | tail -n1)

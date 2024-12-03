@@ -1,45 +1,28 @@
 package plugins
 
 import (
+	"ai-gateway/internal/types"
 	"context"
-	"net/http"
 )
 
 type Plugin interface {
 	Name() string
 	Priority() int
-	Stage() ExecutionStage
+	Stage() types.ExecutionStage
 	Parallel() bool
-	ProcessRequest(ctx context.Context, reqCtx *RequestContext) error
-	ProcessResponse(ctx context.Context, respCtx *ResponseContext) error
+	ProcessRequest(ctx context.Context, reqCtx *types.RequestContext) error
+	ProcessResponse(ctx context.Context, respCtx *types.ResponseContext) error
 }
 
-type ExecutionStage int
-
-const (
-	PreRequest ExecutionStage = iota
-	PostRequest
-	PreResponse
-	PostResponse
-)
-
-// RequestContext contains all the information about the request
-type RequestContext struct {
-	TenantID        string
-	OriginalRequest *http.Request
-	ForwardRequest  *http.Request
-	Rule            interface{}
-	Metadata        map[string]interface{}
-	RequestBody     map[string]interface{}
-	SelectedFields  []string
+type PluginFactory interface {
+	CreatePlugin(name string, config map[string]interface{}) (Plugin, error)
 }
 
-// ResponseContext contains all the information about the response
-type ResponseContext struct {
-	TenantID        string
-	OriginalRequest *http.Request
-	Response        *http.Response
-	Metadata        map[string]interface{}
-	ResponseBody    map[string]interface{}
-	SelectedFields  []string
+type PluginRegistry interface {
+	GetPlugin(name string) (Plugin, bool)
+	RegisterPlugin(name string, plugin Plugin) error
+}
+
+type PluginManager struct {
+	Manager
 }

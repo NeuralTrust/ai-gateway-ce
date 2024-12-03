@@ -336,7 +336,7 @@ func (p *Proxy) executePluginChain(ctx context.Context, stage string, rule *rule
 			go func(config rules.PluginConfig) {
 				defer wg.Done()
 
-				plugin, exists := p.plugins.Get(config.Name)
+				plugin, exists := p.plugins.GetPlugin(config.Name)
 				if !exists {
 					errChan <- fmt.Errorf("plugin %s not found", config.Name)
 					return
@@ -344,9 +344,9 @@ func (p *Proxy) executePluginChain(ctx context.Context, stage string, rule *rule
 
 				var err error
 				if resp == nil {
-					err = plugin.ProcessRequest(ctx, reqCtx)
+					_, err = plugin.ProcessRequest(ctx, reqCtx)
 				} else {
-					err = plugin.ProcessResponse(ctx, respCtx)
+					_, err = plugin.ProcessResponse(ctx, respCtx)
 				}
 
 				if err != nil {
@@ -367,16 +367,16 @@ func (p *Proxy) executePluginChain(ctx context.Context, stage string, rule *rule
 
 	// Execute serial plugins
 	for _, pc := range serialPlugins {
-		plugin, exists := p.plugins.Get(pc.Name)
+		plugin, exists := p.plugins.GetPlugin(pc.Name)
 		if !exists {
 			return fmt.Errorf("plugin %s not found", pc.Name)
 		}
 
 		var err error
 		if resp == nil {
-			err = plugin.ProcessRequest(ctx, reqCtx)
+			_, err = plugin.ProcessRequest(ctx, reqCtx)
 		} else {
-			err = plugin.ProcessResponse(ctx, respCtx)
+			_, err = plugin.ProcessResponse(ctx, respCtx)
 		}
 
 		if err != nil {

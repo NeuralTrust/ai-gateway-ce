@@ -15,8 +15,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/sirupsen/logrus"
 
-	"ai-gateway/internal/plugins"
-	"ai-gateway/internal/rules"
+	"ai-gateway/internal/types"
 )
 
 type RateLimiter struct {
@@ -26,9 +25,9 @@ type RateLimiter struct {
 	defaultTier string
 	limitTypes  RateLimitType
 	dynamic     *DynamicConfig
+	mu          sync.RWMutex
 	quota       *QuotaConfig
 	actions     *RateLimitAction
-	mu          sync.RWMutex
 }
 
 type RateLimitTier struct {
@@ -80,77 +79,175 @@ type Config struct {
 	RedisClient *redis.Client
 }
 
-func NewRateLimiter(config Config, logger *logrus.Logger) (*RateLimiter, error) {
-	if config.RedisClient == nil {
+func NewRateLimiter(redis *redis.Client, logger *logrus.Logger, config types.PluginConfig) (*RateLimiter, error) {
+	if redis == nil {
 		return nil, fmt.Errorf("redis client is required")
 	}
 
-	// Validate tiers
-	if len(config.Tiers) == 0 {
-		return nil, fmt.Errorf("at least one tier must be defined")
-	}
+	logger.WithField("config", config).Debug("Creating rate limiter with config")
 
-	// Validate default tier
-	if _, exists := config.Tiers[config.DefaultTier]; !exists {
-		return nil, fmt.Errorf("default tier %s not found in tiers", config.DefaultTier)
-	}
-
-	return &RateLimiter{
-		redis:       config.RedisClient,
+	// Initialize with default values
+	rl := &RateLimiter{
+		redis:       redis,
 		logger:      logger,
-		tiers:       config.Tiers,
-		defaultTier: config.DefaultTier,
-		limitTypes:  config.LimitTypes,
-		dynamic:     config.Dynamic,
-		quota:       config.Quota,
-		actions:     config.Actions,
-	}, nil
+		tiers:       make(map[string]RateLimitTier),
+		defaultTier: "basic",
+		limitTypes: RateLimitType{
+			Global: true,
+		},
+	}
+
+	// Parse settings if available
+	if settings := config.Settings; settings != nil {
+		// Parse tiers
+		if tiersConfig, ok := settings["tiers"].(map[string]interface{}); ok {
+			for name, t := range tiersConfig {
+				if tierMap, ok := t.(map[string]interface{}); ok {
+					window := "1m"
+					if w, ok := tierMap["window"].(string); ok {
+						window = w
+					}
+					windowDuration, err := time.ParseDuration(window)
+					if err != nil {
+						windowDuration = time.Minute
+					}
+
+					limit := 5
+					if l, ok := tierMap["limit"].(float64); ok {
+						limit = int(l)
+					}
+
+					burst := 0
+					if b, ok := tierMap["burst"].(float64); ok {
+						burst = int(b)
+					}
+
+					rl.tiers[name] = RateLimitTier{
+						Name:     name,
+						Limit:    limit,
+						Window:   windowDuration,
+						Burst:    burst,
+						Priority: 1,
+					}
+				}
+			}
+		}
+
+		// Set default tier
+		if defaultTier, ok := settings["default_tier"].(string); ok {
+			rl.defaultTier = defaultTier
+		}
+	}
+
+	// Log the initialized configuration
+	rl.logger.WithFields(logrus.Fields{
+		"tiers":        rl.tiers,
+		"default_tier": rl.defaultTier,
+		"limit_types":  rl.limitTypes,
+	}).Debug("Rate limiter initialized")
+
+	return rl, nil
 }
 
 func (r *RateLimiter) Name() string {
-	return rules.PluginRateLimiter
+	return "rate_limiter"
 }
 
 func (r *RateLimiter) Priority() int {
 	return 1
 }
 
-func (r *RateLimiter) Stage() plugins.ExecutionStage {
-	return plugins.PreRequest
+func (r *RateLimiter) Stage() types.ExecutionStage {
+	return types.PreRequest
 }
 
 func (r *RateLimiter) Parallel() bool {
-	return false // Rate limiting must be sequential
+	return false
 }
 
-func (r *RateLimiter) ProcessRequest(ctx context.Context, reqCtx *plugins.RequestContext) error {
-	// Get tier from request metadata or use default
+func (r *RateLimiter) ProcessRequest(ctx context.Context, reqCtx *types.RequestContext) error {
+	// Get tier from header or metadata
 	tier := r.getTierForRequest(reqCtx)
 
-	// Build rate limit keys based on configured types
-	keys := r.buildRateLimitKeys(reqCtx, tier)
+	// Create Redis key for this tenant's rate limit
+	key := fmt.Sprintf("ratelimit:%s", reqCtx.TenantID)
 
-	// Check all applicable limits
-	for _, key := range keys {
-		if err := r.checkLimit(ctx, key, tier); err != nil {
-			return r.handleLimitExceeded(ctx, reqCtx, err)
+	// Use sliding window with Redis
+	now := time.Now().Unix()
+	windowStart := now - int64(tier.Window.Seconds())
+
+	// First, clean up old entries
+	err := r.redis.ZRemRangeByScore(ctx, key, "0", strconv.FormatInt(windowStart, 10)).Err()
+	if err != nil {
+		return fmt.Errorf("failed to clean up old entries: %w", err)
+	}
+
+	// Get current count
+	count, err := r.redis.ZCard(ctx, key).Result()
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("failed to get rate limit count: %w", err)
+	}
+
+	// Check if we would exceed the limit
+	if count >= int64(tier.Limit) {
+		ttl := r.redis.TTL(ctx, key).Val()
+		if ttl < 0 {
+			ttl = tier.Window
+		}
+
+		r.logger.WithFields(logrus.Fields{
+			"tenant_id": reqCtx.TenantID,
+			"limit":     tier.Limit,
+			"count":     count,
+			"window":    tier.Window.String(),
+			"ttl":       ttl.Seconds(),
+		}).Warn("Rate limit exceeded")
+
+		// Set response headers
+		if reqCtx.ForwardRequest != nil && reqCtx.ForwardRequest.Header != nil {
+			reqCtx.ForwardRequest.Header.Set("X-RateLimit-Limit", strconv.Itoa(tier.Limit))
+			reqCtx.ForwardRequest.Header.Set("X-RateLimit-Reset", strconv.FormatInt(now+int64(ttl.Seconds()), 10))
+			reqCtx.ForwardRequest.Header.Set("Retry-After", strconv.FormatInt(int64(ttl.Seconds()), 10))
+		}
+
+		// Return error to stop the request flow
+		reqCtx.StopForwarding = true
+		return &types.PluginError{
+			Message:    fmt.Sprintf("Rate limit exceeded. Try again in %d seconds", int(ttl.Seconds())),
+			StatusCode: http.StatusTooManyRequests,
 		}
 	}
 
-	// Check quota if configured
-	if r.quota != nil {
-		if err := r.checkQuota(ctx, reqCtx); err != nil {
-			return r.handleLimitExceeded(ctx, reqCtx, err)
-		}
+	// Add current request
+	err = r.redis.ZAdd(ctx, key, &redis.Z{Score: float64(now), Member: now}).Err()
+	if err != nil {
+		return fmt.Errorf("failed to add request to rate limit: %w", err)
+	}
+
+	// Set expiration
+	err = r.redis.Expire(ctx, key, tier.Window).Err()
+	if err != nil {
+		return fmt.Errorf("failed to set expiration: %w", err)
 	}
 
 	// Add rate limit headers
-	r.addRateLimitHeaders(reqCtx, tier)
+	remaining := tier.Limit - int(count) - 1
+	reqCtx.ForwardRequest.Header.Set("X-RateLimit-Limit", strconv.Itoa(tier.Limit))
+	reqCtx.ForwardRequest.Header.Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
+	reqCtx.ForwardRequest.Header.Set("X-RateLimit-Reset", strconv.FormatInt(now+int64(tier.Window.Seconds()), 10))
+
+	r.logger.WithFields(logrus.Fields{
+		"tenant_id": reqCtx.TenantID,
+		"limit":     tier.Limit,
+		"count":     count + 1,
+		"remaining": remaining,
+		"window":    tier.Window.String(),
+	}).Debug("Rate limit request processed")
 
 	return nil
 }
 
-func (r *RateLimiter) ProcessResponse(ctx context.Context, respCtx *plugins.ResponseContext) error {
+func (r *RateLimiter) ProcessResponse(ctx context.Context, respCtx *types.ResponseContext) error {
 	// Update dynamic limits based on response
 	if r.dynamic != nil && r.dynamic.AutoScale {
 		r.updateDynamicLimits(respCtx)
@@ -158,20 +255,65 @@ func (r *RateLimiter) ProcessResponse(ctx context.Context, respCtx *plugins.Resp
 	return nil
 }
 
-// Helper methods
+func (r *RateLimiter) getTierForRequest(reqCtx *types.RequestContext) RateLimitTier {
+	// Log the available tiers for debugging
+	r.logger.WithFields(logrus.Fields{
+		"tiers":        r.tiers,
+		"default_tier": r.defaultTier,
+	}).Debug("Getting tier for request")
 
-func (r *RateLimiter) getTierForRequest(reqCtx *plugins.RequestContext) RateLimitTier {
-	// Check for tier in request metadata or headers
-	tierName := r.defaultTier
+	// First check for tier in header
+	if tierName := reqCtx.OriginalRequest.Header.Get("X-Rate-Limit-Tier"); tierName != "" {
+		if tier, ok := r.tiers[tierName]; ok {
+			r.logger.WithField("tier", tierName).Debug("Using tier from header")
+			return tier
+		}
+	}
+
+	// Then check metadata
 	if tier, exists := reqCtx.Metadata["tier"].(string); exists {
 		if t, ok := r.tiers[tier]; ok {
 			return t
 		}
 	}
-	return r.tiers[tierName]
+
+	// If no tiers are configured, create a default one
+	if len(r.tiers) == 0 {
+		defaultTier := RateLimitTier{
+			Name:     "default",
+			Limit:    5,
+			Window:   time.Minute,
+			Burst:    0,
+			Priority: 1,
+		}
+		r.tiers = map[string]RateLimitTier{
+			"default": defaultTier,
+		}
+		r.defaultTier = "default"
+		return defaultTier
+	}
+
+	// Use default tier
+	if tier, ok := r.tiers[r.defaultTier]; ok {
+		return tier
+	}
+
+	// If default tier not found, use the first available tier
+	for _, tier := range r.tiers {
+		return tier
+	}
+
+	// Fallback to a basic tier if nothing else is available
+	return RateLimitTier{
+		Name:     "basic",
+		Limit:    5,
+		Window:   time.Minute,
+		Burst:    0,
+		Priority: 1,
+	}
 }
 
-func (r *RateLimiter) buildRateLimitKeys(reqCtx *plugins.RequestContext, tier RateLimitTier) []string {
+func (r *RateLimiter) buildRateLimitKeys(reqCtx *types.RequestContext, tier RateLimitTier) []string {
 	var keys []string
 	base := fmt.Sprintf("ratelimit:%s", reqCtx.TenantID)
 
@@ -222,7 +364,26 @@ func (r *RateLimiter) checkLimit(ctx context.Context, key string, tier RateLimit
 	return nil
 }
 
-func (r *RateLimiter) checkQuota(ctx context.Context, reqCtx *plugins.RequestContext) error {
+func (r *RateLimiter) getClientIP(req *http.Request) string {
+	// Check X-Forwarded-For header
+	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
+		ips := strings.Split(xff, ",")
+		if len(ips) > 0 {
+			return strings.TrimSpace(ips[0])
+		}
+	}
+
+	// Check X-Real-IP header
+	if xrip := req.Header.Get("X-Real-IP"); xrip != "" {
+		return xrip
+	}
+
+	// Fall back to RemoteAddr
+	ip, _, _ := net.SplitHostPort(req.RemoteAddr)
+	return ip
+}
+
+func (r *RateLimiter) checkQuota(ctx context.Context, reqCtx *types.RequestContext) error {
 	if r.quota == nil {
 		return nil
 	}
@@ -246,7 +407,7 @@ func (r *RateLimiter) checkQuota(ctx context.Context, reqCtx *plugins.RequestCon
 	return nil
 }
 
-func (r *RateLimiter) handleLimitExceeded(ctx context.Context, reqCtx *plugins.RequestContext, err error) error {
+func (r *RateLimiter) handleLimitExceeded(ctx context.Context, reqCtx *types.RequestContext, err error) error {
 	if r.actions == nil {
 		return err
 	}
@@ -269,7 +430,7 @@ func (r *RateLimiter) handleLimitExceeded(ctx context.Context, reqCtx *plugins.R
 	return err
 }
 
-func (r *RateLimiter) addRateLimitHeaders(reqCtx *plugins.RequestContext, tier RateLimitTier) {
+func (r *RateLimiter) addRateLimitHeaders(reqCtx *types.RequestContext, tier RateLimitTier) {
 	reqCtx.ForwardRequest.Header.Set("X-RateLimit-Limit", strconv.Itoa(tier.Limit))
 	reqCtx.ForwardRequest.Header.Set("X-RateLimit-Window", tier.Window.String())
 	if r.actions != nil && r.actions.RetryAfter != "" {
@@ -277,7 +438,7 @@ func (r *RateLimiter) addRateLimitHeaders(reqCtx *plugins.RequestContext, tier R
 	}
 }
 
-func (r *RateLimiter) updateDynamicLimits(respCtx *plugins.ResponseContext) {
+func (r *RateLimiter) updateDynamicLimits(respCtx *types.ResponseContext) {
 	if respCtx.Response.StatusCode >= 500 {
 		r.mu.Lock()
 		defer r.mu.Unlock()
@@ -289,26 +450,7 @@ func (r *RateLimiter) updateDynamicLimits(respCtx *plugins.ResponseContext) {
 	}
 }
 
-func (r *RateLimiter) getClientIP(req *http.Request) string {
-	// Check X-Forwarded-For header
-	if xff := req.Header.Get("X-Forwarded-For"); xff != "" {
-		ips := strings.Split(xff, ",")
-		if len(ips) > 0 {
-			return strings.TrimSpace(ips[0])
-		}
-	}
-
-	// Check X-Real-IP header
-	if xrip := req.Header.Get("X-Real-IP"); xrip != "" {
-		return xrip
-	}
-
-	// Fall back to RemoteAddr
-	ip, _, _ := net.SplitHostPort(req.RemoteAddr)
-	return ip
-}
-
-func (r *RateLimiter) sendNotification(ctx context.Context, reqCtx *plugins.RequestContext, err error) {
+func (r *RateLimiter) sendNotification(ctx context.Context, reqCtx *types.RequestContext, err error) {
 	notification := map[string]interface{}{
 		"tenant_id": reqCtx.TenantID,
 		"path":      reqCtx.OriginalRequest.URL.Path,

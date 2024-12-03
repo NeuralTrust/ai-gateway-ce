@@ -19,7 +19,7 @@ func ExtractTenantFromSubdomain(host string, baseDomain string) string {
 
 	// Remove the base domain and the trailing dot
 	tenant := strings.TrimSuffix(host, "."+baseDomain)
-	
+
 	// Validate tenant name contains only allowed characters
 	if !isValidTenantName(tenant) {
 		return ""
@@ -33,13 +33,13 @@ func isValidTenantName(tenant string) bool {
 	if len(tenant) == 0 {
 		return false
 	}
-	
+
 	for _, char := range tenant {
-		if !((char >= 'a' && char <= 'z') || 
-			(char >= '0' && char <= '9') || 
+		if !((char >= 'a' && char <= 'z') ||
+			(char >= '0' && char <= '9') ||
 			char == '-') {
 			return false
 		}
 	}
 	return true
-} 
+}
