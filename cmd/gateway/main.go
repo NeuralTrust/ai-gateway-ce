@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"log"
 	"os"
 
@@ -8,10 +9,11 @@ import (
 	"github.com/spf13/viper"
 
 	"ai-gateway/internal/cache"
+	"ai-gateway/internal/database"
 	"ai-gateway/internal/server"
 )
 
-type Config struct {
+type AppConfig struct {
 	Server struct {
 		AdminPort  int    `mapstructure:"admin_port"`
 		ProxyPort  int    `mapstructure:"proxy_port"`
@@ -23,6 +25,14 @@ type Config struct {
 		Password string `mapstructure:"password"`
 		DB       int    `mapstructure:"db"`
 	} `mapstructure:"redis"`
+	Database struct {
+		Host     string `mapstructure:"host"`
+		Port     int    `mapstructure:"port"`
+		User     string `mapstructure:"user"`
+		Password string `mapstructure:"password"`
+		Name     string `mapstructure:"name"`
+		SSLMode  string `mapstructure:"ssl_mode"`
+	} `mapstructure:"database"`
 }
 
 func main() {
@@ -30,14 +40,39 @@ func main() {
 	logger := logrus.New()
 	logger.SetFormatter(&logrus.JSONFormatter{})
 
+	// Set log level
 	if os.Getenv("LOG_LEVEL") == "debug" {
 		logger.SetLevel(logrus.DebugLevel)
 	}
 
+	// Determine server type from command line
+	serverType := "proxy"
+	if len(os.Args) > 1 {
+		serverType = os.Args[1]
+	}
+
+	// Set up logging to file
+	var logFile string
+	if serverType == "admin" {
+		logFile = "admin.log"
+	} else {
+		logFile = "proxy.log"
+	}
+
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatalf("Failed to open log file %s: %v", logFile, err)
+	}
+	defer file.Close()
+
+	// Set up multi-writer for both file and stdout
+	mw := io.MultiWriter(os.Stdout, file)
+	logger.SetOutput(mw)
+
 	// Load configuration
 	config, err := loadConfig()
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		logger.Fatalf("Failed to load config: %v", err)
 	}
 
 	// Initialize cache
@@ -48,42 +83,49 @@ func main() {
 		DB:       config.Redis.DB,
 	})
 	if err != nil {
-		log.Fatalf("Failed to initialize cache: %v", err)
+		logger.Fatalf("Failed to initialize cache: %v", err)
 	}
 
-	// Determine server type from command line
-	serverType := "proxy"
-	if len(os.Args) > 1 {
-		serverType = os.Args[1]
+	// Initialize database
+	db, err := database.NewDB(&database.Config{
+		Host:     config.Database.Host,
+		Port:     config.Database.Port,
+		User:     config.Database.User,
+		Password: config.Database.Password,
+		DBName:   config.Database.Name,
+		SSLMode:  config.Database.SSLMode,
+	})
+	if err != nil {
+		logger.Fatalf("Failed to initialize database: %v", err)
+	}
+	defer db.Close()
+
+	// Initialize repository
+	repo := database.NewRepository(db)
+
+	// Create server config
+	serverConfig := &server.Config{
+		AdminPort:  config.Server.AdminPort,
+		ProxyPort:  config.Server.ProxyPort,
+		BaseDomain: config.Server.BaseDomain,
 	}
 
+	var srv server.Server
 	switch serverType {
 	case "admin":
-		srv := server.NewAdminServer(&server.Config{
-			AdminPort:  config.Server.AdminPort,
-			BaseDomain: config.Server.BaseDomain,
-		}, cache, logger)
-
-		if err := srv.Run(); err != nil {
-			log.Fatalf("Failed to start admin server: %v", err)
-		}
-
+		srv = server.NewAdminServer(serverConfig, cache, repo, logger)
 	case "proxy":
-		srv := server.NewProxyServer(&server.Config{
-			ProxyPort:  config.Server.ProxyPort,
-			BaseDomain: config.Server.BaseDomain,
-		}, cache, logger)
-
-		if err := srv.Run(); err != nil {
-			log.Fatalf("Failed to start proxy server: %v", err)
-		}
-
+		srv = server.NewProxyServer(serverConfig, cache, repo, logger)
 	default:
-		log.Fatalf("Unknown server type: %s", serverType)
+		logger.Fatalf("Unknown server type: %s", serverType)
+	}
+
+	if err := srv.Run(); err != nil {
+		logger.Fatalf("Server failed: %v", err)
 	}
 }
 
-func loadConfig() (*Config, error) {
+func loadConfig() (*AppConfig, error) {
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
@@ -93,7 +135,7 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 
-	var config Config
+	var config AppConfig
 	if err := viper.Unmarshal(&config); err != nil {
 		return nil, err
 	}

@@ -16,7 +16,7 @@ const (
 )
 
 // Request/Response types for API
-type CreateTenantRequest struct {
+type CreateGatewayRequest struct {
 	Name            string                  `json:"name" binding:"required"`
 	Subdomain       string                  `json:"subdomain" binding:"required"`
 	Tier            string                  `json:"tier" binding:"required"`
@@ -24,10 +24,10 @@ type CreateTenantRequest struct {
 	RequiredPlugins map[string]PluginConfig `json:"required_plugins"`
 }
 
-type UpdateTenantRequest struct {
-	Name            string                  `json:"name,omitempty"`
-	Status          string                  `json:"status,omitempty"`
-	Tier            string                  `json:"tier,omitempty"`
+type UpdateGatewayRequest struct {
+	Name            *string                 `json:"name,omitempty"`
+	Status          *string                 `json:"status,omitempty"`
+	Tier            *string                 `json:"tier,omitempty"`
 	EnabledPlugins  []string                `json:"enabled_plugins,omitempty"`
 	RequiredPlugins map[string]PluginConfig `json:"required_plugins,omitempty"`
 }
@@ -61,25 +61,26 @@ type UpdateRuleRequest struct {
 }
 
 type ForwardingRule struct {
-	ID            string            `json:"id"`
-	TenantID      string            `json:"tenant_id"`
-	Path          string            `json:"path"`
-	Target        string            `json:"target"`
-	Methods       []string          `json:"methods"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	StripPath     bool              `json:"strip_path"`
-	Active        bool              `json:"active"`
-	PreserveHost  bool              `json:"preserve_host"`
-	RetryAttempts int               `json:"retry_attempts,omitempty"`
-	PluginChain   []PluginConfig    `json:"plugin_chain,omitempty"`
-	Public        bool              `json:"public"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
+	ID            string         `json:"id"`
+	GatewayID     string         `json:"gateway_id"`
+	Path          string         `json:"path"`
+	Target        string         `json:"target"`
+	Methods       []string       `json:"methods"`
+	Headers       []string       `json:"headers,omitempty"`
+	StripPath     bool           `json:"strip_path"`
+	PreserveHost  bool           `json:"preserve_host"`
+	RetryAttempts int            `json:"retry_attempts"`
+	PluginChain   []PluginConfig `json:"plugin_chain"`
+	Active        bool           `json:"active"`
+	Public        bool           `json:"public"`
+	CreatedAt     time.Time      `json:"created_at"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	WebSocket     bool           `json:"websocket"`
 }
 
 type RequestContext struct {
 	Ctx                context.Context
-	TenantID           string
+	GatewayID          string
 	OriginalRequest    *http.Request
 	ForwardRequest     *http.Request
 	Rule               *ForwardingRule
@@ -90,7 +91,7 @@ type RequestContext struct {
 
 type ResponseContext struct {
 	Ctx              context.Context
-	TenantID         string
+	GatewayID        string
 	OriginalRequest  *http.Request
 	OriginalResponse *http.Response
 	Response         *http.Response
@@ -125,8 +126,8 @@ func (e *PluginError) Error() string {
 	return e.Message
 }
 
-// Tenant types
-type Tenant struct {
+// Gateway types
+type Gateway struct {
 	ID              string                  `json:"id"`
 	Name            string                  `json:"name"`
 	Subdomain       string                  `json:"subdomain"`
@@ -144,7 +145,7 @@ type APIKey struct {
 	ID         string     `json:"id"`
 	Name       string     `json:"name"`
 	Key        string     `json:"key"`
-	TenantID   string     `json:"tenant_id"`
+	GatewayID  string     `json:"gateway_id"`
 	CreatedAt  time.Time  `json:"created_at"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`

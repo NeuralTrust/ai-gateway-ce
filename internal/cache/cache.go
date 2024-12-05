@@ -27,32 +27,31 @@ func NewCache(config Config) (*Cache, error) {
 	})
 
 	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := client.Ping(ctx).Err(); err != nil {
-		return nil, fmt.Errorf("failed to connect to redis: %w", err)
+	if err := client.Ping(context.Background()).Err(); err != nil {
+		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
 	}
 
-	return &Cache{
-		client: client,
-	}, nil
-}
-
-func (c *Cache) GetRedisClient() *redis.Client {
-	return c.client
+	return &Cache{client: client}, nil
 }
 
 func (c *Cache) Get(ctx context.Context, key string) (string, error) {
 	return c.client.Get(ctx, key).Result()
 }
 
-func (c *Cache) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+func (c *Cache) Set(ctx context.Context, key string, value string, expiration time.Duration) error {
 	return c.client.Set(ctx, key, value, expiration).Err()
 }
 
-func (c *Cache) Del(ctx context.Context, keys ...string) error {
-	return c.client.Del(ctx, keys...).Err()
+func (c *Cache) Delete(ctx context.Context, key string) error {
+	return c.client.Del(ctx, key).Err()
+}
+
+func (c *Cache) Close() error {
+	return c.client.Close()
+}
+
+func (c *Cache) Client() *redis.Client {
+	return c.client
 }
 
 func (c *Cache) Keys(ctx context.Context, pattern string) ([]string, error) {

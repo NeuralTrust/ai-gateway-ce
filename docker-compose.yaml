@@ -6,8 +6,6 @@ services:
     restart: always
     ports:
       - "6379:6379"
-    environment:
-      REDIS_PASSWORD: secret
   redis-insight:
     image: redis/redisinsight:latest
     restart: always
@@ -15,6 +13,23 @@ services:
       - "5540:5540"
     volumes:
       - redis-insight:/data
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ai_gateway
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
 volumes:
   redis-insight:
+  postgres_data:

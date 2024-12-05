@@ -2,6 +2,8 @@ package plugins
 
 import (
 	"fmt"
+	"reflect"
+	"sync"
 
 	"ai-gateway/internal/types"
 
@@ -56,18 +58,35 @@ func (m *Manager) ExecutePlugins(plugins []types.PluginConfig, ctx interface{}) 
 
 	// Execute serial plugins first
 	for _, config := range serialPlugins {
+		if !config.Enabled {
+			continue
+		}
+
+		m.logger.WithFields(logrus.Fields{
+			"plugin":   config.Name,
+			"settings": config.Settings,
+		}).Debug("Executing serial plugin")
+
 		plugin, err := m.GetOrCreatePlugin(config.Name, config)
 		if err != nil {
 			return err
 		}
 
 		if err := m.executePlugin(plugin, ctx); err != nil {
+			if pluginErr, ok := err.(*types.PluginError); ok {
+				m.logger.WithFields(logrus.Fields{
+					"plugin":      config.Name,
+					"status_code": pluginErr.StatusCode,
+					"message":     pluginErr.Message,
+				}).Warn("Plugin error")
+				return err
+			}
 			if reqCtx, ok := ctx.(*types.RequestContext); ok && reqCtx.StopForwarding {
 				m.logger.WithError(err).Warn("Plugin requested to stop forwarding")
 				return err
 			}
-			m.logger.WithError(err).Error("Plugin execution error, continuing request flow")
-			continue
+			m.logger.WithError(err).Error("Plugin execution error")
+			return err
 		}
 	}
 
@@ -76,7 +95,58 @@ func (m *Manager) ExecutePlugins(plugins []types.PluginConfig, ctx interface{}) 
 		return fmt.Errorf("request forwarding stopped by plugin")
 	}
 
-	// Rest of parallel plugins execution...
+	// Execute parallel plugins
+	if len(parallelPlugins) > 0 {
+		errChan := make(chan error, len(parallelPlugins))
+		var wg sync.WaitGroup
+
+		for _, config := range parallelPlugins {
+			if !config.Enabled {
+				continue
+			}
+
+			wg.Add(1)
+			go func(pc types.PluginConfig) {
+				defer wg.Done()
+
+				m.logger.WithFields(logrus.Fields{
+					"plugin":   pc.Name,
+					"settings": pc.Settings,
+				}).Debug("Executing parallel plugin")
+
+				plugin, err := m.GetOrCreatePlugin(pc.Name, pc)
+				if err != nil {
+					errChan <- err
+					return
+				}
+
+				if err := m.executePlugin(plugin, ctx); err != nil {
+					errChan <- err
+					return
+				}
+			}(config)
+		}
+
+		// Wait for all parallel plugins to complete
+		wg.Wait()
+		close(errChan)
+
+		// Check for any errors from parallel plugins
+		for err := range errChan {
+			if err != nil {
+				if pluginErr, ok := err.(*types.PluginError); ok {
+					m.logger.WithFields(logrus.Fields{
+						"status_code": pluginErr.StatusCode,
+						"message":     pluginErr.Message,
+					}).Warn("Parallel plugin error")
+					return err
+				}
+				m.logger.WithError(err).Error("Parallel plugin execution error")
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -89,4 +159,15 @@ func (m *Manager) executePlugin(plugin Plugin, ctx interface{}) error {
 	default:
 		return fmt.Errorf("unknown context type")
 	}
+}
+
+func (m *Manager) ValidatePluginConfig(plugins interface{}) (interface{}, error) {
+	// If plugins is nil or empty bytes, return empty object
+	if plugins == nil || (reflect.TypeOf(plugins).Kind() == reflect.Slice && reflect.ValueOf(plugins).Len() == 0) {
+		return map[string]interface{}{}, nil
+	}
+
+	// Add proper validation for plugins data
+	// Return cleaned/validated plugins configuration
+	return plugins, nil
 }

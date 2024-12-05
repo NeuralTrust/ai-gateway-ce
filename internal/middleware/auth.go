@@ -28,17 +28,17 @@ func NewAuthMiddleware(cache *cache.Cache, logger *logrus.Logger) *AuthMiddlewar
 
 func (m *AuthMiddleware) ValidateAPIKey() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Skip validation for tenant creation
-		if c.Request.Method == "POST" && c.FullPath() == "/api/v1/tenants" {
+		// Skip validation for gateway creation
+		if c.Request.Method == "POST" && c.FullPath() == "/api/v1/gateways" {
 			c.Next()
 			return
 		}
 
-		// Get tenant ID from context
-		tenantID, exists := c.Get(TenantContextKey)
+		// Get gateway ID from context
+		gatewayID, exists := c.Get(GatewayContextKey)
 		if !exists {
-			m.logger.Error("Tenant ID not found in context")
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Tenant ID is required"})
+			m.logger.Error("Gateway ID not found in context")
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Gateway ID is required"})
 			c.Abort()
 			return
 		}
@@ -59,8 +59,8 @@ func (m *AuthMiddleware) ValidateAPIKey() gin.HandlerFunc {
 
 		apiKey := strings.TrimPrefix(authHeader, AuthPrefix)
 
-		// Get all API keys for the tenant
-		setKey := fmt.Sprintf("tenant:%s:apikeys", tenantID)
+		// Get all API keys for the gateway
+		setKey := fmt.Sprintf("gateway:%s:apikeys", gatewayID)
 		keyIDs, err := m.cache.SMembers(c, setKey)
 		if err != nil {
 			m.logger.WithError(err).Error("Failed to get API keys")
@@ -71,7 +71,7 @@ func (m *AuthMiddleware) ValidateAPIKey() gin.HandlerFunc {
 
 		// Check each API key
 		for _, keyID := range keyIDs {
-			key := fmt.Sprintf("apikey:%s:%s", tenantID, keyID)
+			key := fmt.Sprintf("apikey:%s:%s", gatewayID, keyID)
 			apiKeyJSON, err := m.cache.Get(c, key)
 			if err != nil {
 				continue
@@ -111,13 +111,13 @@ func (m *AuthMiddleware) ValidateAPIKey() gin.HandlerFunc {
 			}
 		}
 
-		// Check tenant's main API key as fallback
-		tenantKey := fmt.Sprintf("tenant:%s", tenantID)
-		tenantJSON, err := m.cache.Get(c, tenantKey)
+		// Check gateway's main API key as fallback
+		gatewayKey := fmt.Sprintf("gateway:%s", gatewayID)
+		gatewayJSON, err := m.cache.Get(c, gatewayKey)
 		if err == nil {
-			var tenant types.Tenant
-			if err := json.Unmarshal([]byte(tenantJSON), &tenant); err == nil {
-				if tenant.ApiKey == apiKey {
+			var gateway types.Gateway
+			if err := json.Unmarshal([]byte(gatewayJSON), &gateway); err == nil {
+				if gateway.ApiKey == apiKey {
 					c.Next()
 					return
 				}
@@ -125,7 +125,7 @@ func (m *AuthMiddleware) ValidateAPIKey() gin.HandlerFunc {
 		}
 
 		m.logger.WithFields(logrus.Fields{
-			"tenant_id": tenantID,
+			"gateway_id": gatewayID,
 		}).Warn("Invalid API key attempt")
 
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
