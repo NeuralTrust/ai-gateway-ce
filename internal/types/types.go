@@ -2,18 +2,85 @@ package types
 
 import (
 	"context"
-	"net/http"
 	"strings"
 	"time"
+
+	"github.com/go-redis/redis/v8"
+	"github.com/sirupsen/logrus"
+	"github.com/valyala/fasthttp"
 )
 
-// Plugin related types
+// ExecutionStage represents the stage at which a plugin is executed
 type ExecutionStage string
 
 const (
-	PreRequest  ExecutionStage = "pre_request"
-	PostRequest ExecutionStage = "post_request"
+	PreRequest   ExecutionStage = "pre_request"
+	PostRequest  ExecutionStage = "post_request"
+	PreResponse  ExecutionStage = "pre_response"
+	PostResponse ExecutionStage = "post_response"
 )
+
+// RequestContext represents the context for processing requests
+type RequestContext struct {
+	GatewayID          string                 `json:"gateway_id"`
+	Path               string                 `json:"path"`
+	Method             string                 `json:"method"`
+	Headers            map[string]string      `json:"headers"`
+	Body               []byte                 `json:"body"`
+	Context            context.Context        `json:"context"`
+	Request            *fasthttp.Request      `json:"request"`
+	Response           *fasthttp.Response     `json:"response"`
+	Modified           bool                   `json:"modified"`
+	Metadata           map[string]interface{} `json:"metadata"`
+	ValidationResponse []byte                 `json:"validation_response"`
+	OriginalRequest    *fasthttp.Request      `json:"original_request"`
+	ForwardRequest     *fasthttp.Request      `json:"forward_request"`
+	StopForwarding     bool                   `json:"stop_forwarding"`
+}
+
+// ResponseContext represents the context for processing responses
+type ResponseContext struct {
+	GatewayID        string                 `json:"gateway_id"`
+	Headers          map[string]string      `json:"headers"`
+	Body             []byte                 `json:"body"`
+	Context          context.Context        `json:"context"`
+	Request          *fasthttp.Request      `json:"request"`
+	Response         *fasthttp.Response     `json:"response"`
+	Modified         bool                   `json:"modified"`
+	Metadata         map[string]interface{} `json:"metadata"`
+	OriginalRequest  *fasthttp.Request      `json:"original_request"`
+	OriginalResponse *fasthttp.Response     `json:"original_response"`
+}
+
+// PluginError represents a plugin execution error
+type PluginError struct {
+	StatusCode int    `json:"status_code"`
+	Message    string `json:"message"`
+}
+
+func (e *PluginError) Error() string {
+	return e.Message
+}
+
+// ResponseCondition represents a condition for response validation
+type ResponseCondition struct {
+	Field    string      `json:"field"`
+	Operator string      `json:"operator"`
+	Value    interface{} `json:"value"`
+	StopFlow bool        `json:"stop_flow"`
+	Message  string      `json:"message"`
+}
+
+// PluginConfig represents the configuration for a plugin
+type PluginConfig struct {
+	Name       string                 `json:"name"`
+	Enabled    bool                   `json:"enabled"`
+	Priority   int                    `json:"priority"`
+	Stage      string                 `json:"stage"`
+	Parallel   bool                   `json:"parallel"`
+	Settings   map[string]interface{} `json:"settings"`
+	Conditions []ResponseCondition    `json:"conditions,omitempty"`
+}
 
 // Request/Response types for API
 type CreateGatewayRequest struct {
@@ -40,93 +107,27 @@ type CreateAPIKeyRequest struct {
 type CreateRuleRequest struct {
 	Path          string            `json:"path" binding:"required"`
 	Target        string            `json:"target" binding:"required"`
-	Methods       []string          `json:"methods,omitempty"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	StripPath     *bool             `json:"strip_path,omitempty"`
-	PreserveHost  *bool             `json:"preserve_host,omitempty"`
-	RetryAttempts *int              `json:"retry_attempts,omitempty"`
-	PluginChain   []PluginConfig    `json:"plugin_chain,omitempty"`
+	Methods       []string          `json:"methods"`
+	Headers       map[string]string `json:"headers"`
+	StripPath     *bool             `json:"strip_path"`
+	PreserveHost  *bool             `json:"preserve_host"`
+	RetryAttempts *int              `json:"retry_attempts"`
+	PluginChain   []PluginConfig    `json:"plugin_chain"`
 }
 
 type UpdateRuleRequest struct {
-	Path          string            `json:"path,omitempty"`
-	Target        string            `json:"target,omitempty"`
-	Methods       []string          `json:"methods,omitempty"`
-	Headers       map[string]string `json:"headers,omitempty"`
-	StripPath     *bool             `json:"strip_path,omitempty"`
-	Active        *bool             `json:"active,omitempty"`
-	PreserveHost  *bool             `json:"preserve_host,omitempty"`
-	RetryAttempts *int              `json:"retry_attempts,omitempty"`
-	PluginChain   []PluginConfig    `json:"plugin_chain,omitempty"`
+	Path          string            `json:"path"`
+	Target        string            `json:"target"`
+	Methods       []string          `json:"methods"`
+	Headers       map[string]string `json:"headers"`
+	StripPath     *bool             `json:"strip_path"`
+	PreserveHost  *bool             `json:"preserve_host"`
+	RetryAttempts *int              `json:"retry_attempts"`
+	Active        *bool             `json:"active"`
+	PluginChain   []PluginConfig    `json:"plugin_chain"`
 }
 
-type ForwardingRule struct {
-	ID            string         `json:"id"`
-	GatewayID     string         `json:"gateway_id"`
-	Path          string         `json:"path"`
-	Target        string         `json:"target"`
-	Methods       []string       `json:"methods"`
-	Headers       []string       `json:"headers,omitempty"`
-	StripPath     bool           `json:"strip_path"`
-	PreserveHost  bool           `json:"preserve_host"`
-	RetryAttempts int            `json:"retry_attempts"`
-	PluginChain   []PluginConfig `json:"plugin_chain"`
-	Active        bool           `json:"active"`
-	Public        bool           `json:"public"`
-	CreatedAt     time.Time      `json:"created_at"`
-	UpdatedAt     time.Time      `json:"updated_at"`
-	WebSocket     bool           `json:"websocket"`
-}
-
-type RequestContext struct {
-	Ctx                context.Context
-	GatewayID          string
-	OriginalRequest    *http.Request
-	ForwardRequest     *http.Request
-	Rule               *ForwardingRule
-	Metadata           map[string]interface{}
-	ValidationResponse []byte
-	StopForwarding     bool
-}
-
-type ResponseContext struct {
-	Ctx              context.Context
-	GatewayID        string
-	OriginalRequest  *http.Request
-	OriginalResponse *http.Response
-	Response         *http.Response
-	Rule             *ForwardingRule
-	Metadata         map[string]interface{}
-}
-
-type PluginConfig struct {
-	Name       string                 `json:"name"`
-	Enabled    bool                   `json:"enabled"`
-	Priority   int                    `json:"priority"`
-	Stage      string                 `json:"stage"`
-	Parallel   bool                   `json:"parallel"`
-	Settings   map[string]interface{} `json:"settings"`
-	Conditions []ResponseCondition    `json:"conditions,omitempty"`
-}
-
-type ResponseCondition struct {
-	Field    string      `json:"field"`
-	Operator string      `json:"operator"`
-	Value    interface{} `json:"value"`
-	StopFlow bool        `json:"stop_flow"`
-	Message  string      `json:"message"`
-}
-
-type PluginError struct {
-	Message    string `json:"message"`
-	StatusCode int    `json:"status_code"`
-}
-
-func (e *PluginError) Error() string {
-	return e.Message
-}
-
-// Gateway types
+// Gateway represents a tenant's gateway configuration
 type Gateway struct {
 	ID              string                  `json:"id"`
 	Name            string                  `json:"name"`
@@ -134,13 +135,13 @@ type Gateway struct {
 	ApiKey          string                  `json:"api_key"`
 	Status          string                  `json:"status"`
 	Tier            string                  `json:"tier"`
-	CreatedAt       time.Time               `json:"created_at"`
-	UpdatedAt       time.Time               `json:"updated_at"`
 	EnabledPlugins  []string                `json:"enabled_plugins"`
 	RequiredPlugins map[string]PluginConfig `json:"required_plugins"`
+	CreatedAt       string                  `json:"created_at"`
+	UpdatedAt       string                  `json:"updated_at"`
 }
 
-// API Key types
+// APIKey represents an API key for gateway authentication
 type APIKey struct {
 	ID         string     `json:"id"`
 	Name       string     `json:"name"`
@@ -152,7 +153,25 @@ type APIKey struct {
 	Status     string     `json:"status"`
 }
 
-// Add these functions at the end of the file
+// ForwardingRule represents a rule for forwarding requests
+type ForwardingRule struct {
+	ID            string            `json:"id"`
+	GatewayID     string            `json:"gateway_id"`
+	Path          string            `json:"path"`
+	Target        string            `json:"target"`
+	Methods       []string          `json:"methods"`
+	Headers       map[string]string `json:"headers"`
+	StripPath     bool              `json:"strip_path"`
+	PreserveHost  bool              `json:"preserve_host"`
+	RetryAttempts int               `json:"retry_attempts"`
+	PluginChain   []PluginConfig    `json:"plugin_chain"`
+	Active        bool              `json:"active"`
+	Public        bool              `json:"public"`
+	CreatedAt     string            `json:"created_at"`
+	UpdatedAt     string            `json:"updated_at"`
+}
+
+// EvaluateCondition evaluates a response condition against a value
 func EvaluateCondition(condition ResponseCondition, value interface{}) bool {
 	switch condition.Operator {
 	case "eq":
@@ -180,39 +199,45 @@ func EvaluateCondition(condition ResponseCondition, value interface{}) bool {
 	}
 }
 
+// Helper functions for condition evaluation
 func compareNumbers(a, b interface{}) int {
 	var aFloat, bFloat float64
 
 	switch v := a.(type) {
-	case float64:
-		aFloat = v
-	case float32:
-		aFloat = float64(v)
 	case int:
+		aFloat = float64(v)
+	case int32:
 		aFloat = float64(v)
 	case int64:
 		aFloat = float64(v)
+	case float32:
+		aFloat = float64(v)
+	case float64:
+		aFloat = v
 	default:
 		return 0
 	}
 
 	switch v := b.(type) {
-	case float64:
-		bFloat = v
-	case float32:
-		bFloat = float64(v)
 	case int:
+		bFloat = float64(v)
+	case int32:
 		bFloat = float64(v)
 	case int64:
 		bFloat = float64(v)
+	case float32:
+		bFloat = float64(v)
+	case float64:
+		bFloat = v
 	default:
 		return 0
 	}
 
+	if aFloat < bFloat {
+		return -1
+	}
 	if aFloat > bFloat {
 		return 1
-	} else if aFloat < bFloat {
-		return -1
 	}
 	return 0
 }
@@ -231,6 +256,31 @@ func containsValue(value, searchValue interface{}) bool {
 				return true
 			}
 		}
+	case map[string]interface{}:
+		for _, item := range v {
+			if item == searchValue {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// Add PluginContext type
+type PluginContext struct {
+	Config   PluginConfig
+	Redis    *redis.Client
+	Logger   *logrus.Logger
+	Metadata map[string]interface{}
+}
+
+// Plugin interface defines the methods that all plugins must implement
+type Plugin interface {
+	Name() string
+	Priority() int
+	Stage() ExecutionStage
+	Parallel() bool
+	ProcessRequest(reqCtx *RequestContext, pluginCtx *PluginContext) error
+	ProcessResponse(respCtx *ResponseContext, pluginCtx *PluginContext) error
+	Configure(config PluginConfig) error
 }

@@ -18,7 +18,7 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Rate Limited Company",
-    "subdomain": "ratelimited6",
+    "subdomain": "ratelimited17",
     "tier": "basic",
     "enabled_plugins": ["rate_limiter"]
   }')
@@ -70,7 +70,7 @@ RULE_REQUEST='{
             "name": "rate_limiter",
             "enabled": true,
             "priority": 0,
-            "stage": "",
+            "stage": "pre_request",
             "parallel": false,
             "settings": {
                 "limits": {
@@ -89,8 +89,12 @@ RULE_REQUEST='{
                 },
                 "limit_types": {
                     "global": true,
-                    "per_ip": true,
-                    "per_user": true
+                    "per_ip": false,
+                    "per_user": false
+                },
+                "actions": {
+                    "type": "block",
+                    "retry_after": "60"
                 }
             }
         }
@@ -100,7 +104,6 @@ RULE_REQUEST='{
 echo -e "Request URL: $ADMIN_URL/gateways/$GATEWAY_ID/rules"
 echo -e "Gateway ID: $GATEWAY_ID"
 echo -e "API Key: $API_KEY"
-echo -e "Request body: $RULE_REQUEST\n"
 
 # Create a temporary file for the response
 TMPFILE=$(mktemp)
@@ -147,7 +150,7 @@ for i in {1..12}; do
     response=$(curl -s -w "\n%{http_code}" \
         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
         -H "Authorization: Bearer ${API_KEY}" \
-        -H "X-Forwarded-For: 1.2.3.$i" \
+        -H "X-Forwarded-For: 1.2.3.4" \
         "${PROXY_URL}/test")
     
     http_code=$(echo "$response" | tail -n1)
@@ -158,6 +161,7 @@ for i in {1..12}; do
         echo -e "${RED}Request $i: Rate Limited (${http_code})${NC}"
         echo "Response: $body"
     fi
+    sleep 0.1  # Small delay to ensure proper order
 done
 
 # 4. Test Per-IP Rate Limit (limit: 5 per minute)
@@ -167,7 +171,7 @@ for i in {1..6}; do
     response=$(curl -s -w "\n%{http_code}" \
         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
         -H "Authorization: Bearer ${API_KEY}" \
-        -H "X-Forwarded-For: 1.2.3.4" \
+        -H "X-Forwarded-For: 2.3.4.5" \
         "${PROXY_URL}/test")
     
     http_code=$(echo "$response" | tail -n1)
@@ -176,6 +180,7 @@ for i in {1..6}; do
     if [ "$http_code" != "200" ]; then
         echo "Response: $body"
     fi
+    sleep 0.1  # Small delay to ensure proper order
 done
 
 # 5. Test Per-User Rate Limit (limit: 3 per minute)
@@ -186,6 +191,7 @@ for i in {1..4}; do
         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
         -H "Authorization: Bearer ${API_KEY}" \
         -H "X-User-ID: test-user" \
+        -H "X-Forwarded-For: 3.4.5.6" \
         "${PROXY_URL}/test")
     
     http_code=$(echo "$response" | tail -n1)
@@ -194,6 +200,7 @@ for i in {1..4}; do
     if [ "$http_code" != "200" ]; then
         echo "Response: $body"
     fi
+    sleep 0.1  # Small delay to ensure proper order
 done
 
 echo -e "\n${GREEN}Rate limiter tests completed${NC}"

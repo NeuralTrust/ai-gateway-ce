@@ -1,28 +1,33 @@
 package plugins
 
 import (
-	"ai-gateway/internal/types"
-	"context"
+	"ai-gateway-ce/internal/types"
 )
 
-type Plugin interface {
-	Name() string
-	Priority() int
-	Stage() types.ExecutionStage
-	Parallel() bool
-	ProcessRequest(ctx context.Context, reqCtx *types.RequestContext) error
-	ProcessResponse(ctx context.Context, respCtx *types.ResponseContext) error
+// PluginManagerInterface defines the plugin management operations
+type PluginManagerInterface interface {
+	RegisterPlugin(name string, plugin types.Plugin) error
+	GetPlugin(name string) (types.Plugin, bool)
 }
 
-type PluginFactory interface {
-	CreatePlugin(name string, config map[string]interface{}) (Plugin, error)
-}
-
-type PluginRegistry interface {
-	GetPlugin(name string) (Plugin, bool)
-	RegisterPlugin(name string, plugin Plugin) error
-}
-
+// PluginManager implements the PluginManagerInterface
 type PluginManager struct {
-	Manager
+	registry *Registry
+}
+
+// NewPluginManager creates a new plugin manager
+func NewPluginManager() *PluginManager {
+	return &PluginManager{
+		registry: NewRegistry(),
+	}
+}
+
+// RegisterPlugin registers a plugin with the manager
+func (pm *PluginManager) RegisterPlugin(name string, plugin types.Plugin) error {
+	return pm.registry.RegisterPlugin(name, plugin)
+}
+
+// GetPlugin retrieves a plugin by name
+func (pm *PluginManager) GetPlugin(name string) (types.Plugin, bool) {
+	return pm.registry.GetPlugin(name)
 }

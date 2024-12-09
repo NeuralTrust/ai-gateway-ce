@@ -7,8 +7,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 
-	"ai-gateway/internal/cache"
-	"ai-gateway/internal/database"
+	"ai-gateway-ce/internal/cache"
+	"ai-gateway-ce/internal/database"
 )
 
 // Server interface defines the common behavior for all servers
@@ -51,4 +51,13 @@ func (s *BaseServer) setupHealthCheck() {
 			"time":   time.Now().Format(time.RFC3339),
 		})
 	})
+}
+
+// Add Run method to BaseServer
+func (s *BaseServer) Run() error {
+	// Setup health check endpoint
+	s.setupHealthCheck()
+
+	// Start the server
+	return s.router.Run(s.config.Address)
 }

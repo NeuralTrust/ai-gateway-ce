@@ -7,6 +7,7 @@ type PluginConfig struct {
 	Priority int                    `json:"priority"`
 	Stage    string                 `json:"stage"`
 	Settings map[string]interface{} `json:"settings"`
+	Parallel bool                   `json:"parallel"`
 }
 
 // Common plugin stages

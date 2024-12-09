@@ -2,7 +2,6 @@ package external
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"ai-gateway/internal/types"
+	"ai-gateway-ce/internal/types"
 
 	"github.com/sirupsen/logrus"
 )
@@ -22,6 +21,7 @@ type ExternalValidator struct {
 	headers    map[string]string
 	timeout    time.Duration
 	conditions []types.ResponseCondition
+	types.BasePlugin
 }
 
 type ValidatorConfig struct {
@@ -32,6 +32,7 @@ type ValidatorConfig struct {
 	Conditions  []types.ResponseCondition `json:"conditions"`
 	RetryCount  int                       `json:"retry_count"`
 	FailOnError bool                      `json:"fail_on_error"`
+	FieldMaps   []types.FieldMapping      `json:"field_maps"`
 }
 
 type ValidationResponse struct {
@@ -81,27 +82,36 @@ func NewExternalValidator(logger *logrus.Logger, config types.PluginConfig) (*Ex
 		}
 	}
 
-	// Get conditions from the plugin config root level
+	// Get conditions from settings
 	var conditions []types.ResponseCondition
-	if configConditions := config.Conditions; configConditions != nil {
+	if configConditions, ok := settings["conditions"].([]interface{}); ok {
 		logger.WithFields(logrus.Fields{
 			"raw_conditions": configConditions,
 		}).Debug("Found conditions in config")
 
 		for _, c := range configConditions {
-			condition := types.ResponseCondition{
-				Field:    c.Field,
-				Operator: c.Operator,
-				Value:    c.Value,
-				StopFlow: c.StopFlow,
-				Message:  c.Message,
+			if condMap, ok := c.(map[string]interface{}); ok {
+				condition := types.ResponseCondition{
+					Field:    condMap["field"].(string),
+					Operator: condMap["operator"].(string),
+					Value:    condMap["value"],
+				}
+				if stopFlow, ok := condMap["stop_flow"].(bool); ok {
+					condition.StopFlow = stopFlow
+				}
+				if message, ok := condMap["message"].(string); ok {
+					condition.Message = message
+				}
+				conditions = append(conditions, condition)
+				logger.WithFields(logrus.Fields{
+					"parsed_condition": condition,
+				}).Debug("Parsed condition")
 			}
-			conditions = append(conditions, condition)
-			logger.WithFields(logrus.Fields{
-				"parsed_condition": condition,
-			}).Debug("Parsed condition")
 		}
 	}
+
+	// Parse field mappings using the helper function
+	fieldMaps := types.ParseFieldMaps(settings)
 
 	logger.WithFields(logrus.Fields{
 		"endpoint":   endpoint,
@@ -109,6 +119,7 @@ func NewExternalValidator(logger *logrus.Logger, config types.PluginConfig) (*Ex
 		"headers":    headers,
 		"timeout":    timeout,
 		"conditions": conditions,
+		"field_maps": fieldMaps,
 	}).Debug("External validator configuration loaded")
 
 	return &ExternalValidator{
@@ -118,6 +129,11 @@ func NewExternalValidator(logger *logrus.Logger, config types.PluginConfig) (*Ex
 		headers:    headers,
 		timeout:    timeout,
 		conditions: conditions,
+		BasePlugin: types.BasePlugin{
+			FieldMapper: types.FieldMapper{
+				FieldMaps: fieldMaps,
+			},
+		},
 	}, nil
 }
 
@@ -137,38 +153,30 @@ func (v *ExternalValidator) Parallel() bool {
 	return true
 }
 
-func (v *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *types.RequestContext) error {
-	// Read and store the original request body
+func (v *ExternalValidator) ProcessRequest(reqCtx *types.RequestContext, pluginCtx *types.PluginContext) error {
 	var originalBody map[string]interface{}
-	if reqCtx.OriginalRequest.Body != nil {
-		if err := json.NewDecoder(reqCtx.OriginalRequest.Body).Decode(&originalBody); err != nil {
-			v.logger.WithError(err).Error("Failed to read request body")
-			return nil
+	if len(reqCtx.Body) > 0 {
+		if err := json.Unmarshal(reqCtx.Body, &originalBody); err != nil {
+			v.logger.WithError(err).Error("Failed to unmarshal request body")
+			return fmt.Errorf("invalid request body: %w", err)
 		}
-		// Reset body for further use
-		bodyBytes, _ := json.Marshal(originalBody)
-		reqCtx.OriginalRequest.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
-	v.logger.WithFields(logrus.Fields{
-		"endpoint":      v.endpoint,
-		"method":        v.method,
-		"headers":       v.headers,
-		"original_body": originalBody,
-	}).Debug("Starting external validation")
+	// Use the field mapper from BasePlugin
+	validationPayload := v.MapFields(originalBody)
 
-	// Use original body directly instead of wrapping it
-	payload, err := json.Marshal(originalBody)
+	// Marshal the validation payload
+	payload, err := json.Marshal(validationPayload)
 	if err != nil {
-		v.logger.WithError(err).Error("Failed to marshal validation request")
-		return nil
+		v.logger.WithError(err).Error("Failed to marshal validation payload")
+		return fmt.Errorf("failed to create validation payload: %w", err)
 	}
 
 	// Create request
-	req, err := http.NewRequestWithContext(ctx, v.method, v.endpoint, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(reqCtx.Context, v.method, v.endpoint, bytes.NewReader(payload))
 	if err != nil {
 		v.logger.WithError(err).Error("Failed to create validation request")
-		return nil
+		return fmt.Errorf("failed to create validation request: %w", err)
 	}
 
 	// Set Content-Type header
@@ -183,17 +191,11 @@ func (v *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *types.Re
 		}).Debug("Setting header")
 	}
 
-	// Forward relevant headers from original request
-	for k, values := range reqCtx.OriginalRequest.Header {
-		if k != "Host" && k != "Content-Length" {
-			req.Header[k] = values
-		}
-	}
-
 	v.logger.WithFields(logrus.Fields{
 		"url":     req.URL.String(),
 		"method":  req.Method,
 		"headers": req.Header,
+		"payload": string(payload),
 	}).Debug("Executing validation request")
 
 	// Execute request
@@ -201,7 +203,10 @@ func (v *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *types.Re
 	resp, err := client.Do(req)
 	if err != nil {
 		v.logger.WithError(err).Error("Failed to execute validation request")
-		return nil
+		return &types.PluginError{
+			StatusCode: http.StatusBadRequest,
+			Message:    "Validation request failed",
+		}
 	}
 	defer resp.Body.Close()
 
@@ -214,7 +219,10 @@ func (v *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *types.Re
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		v.logger.WithError(err).Error("Failed to read response body")
-		return nil
+		return &types.PluginError{
+			StatusCode: http.StatusBadRequest,
+			Message:    "Failed to read validation response",
+		}
 	}
 
 	v.logger.WithFields(logrus.Fields{
@@ -224,7 +232,10 @@ func (v *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *types.Re
 
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		v.logger.WithError(err).Error("Failed to parse validation response")
-		return nil
+		return &types.PluginError{
+			StatusCode: http.StatusBadRequest,
+			Message:    "Invalid validation response format",
+		}
 	}
 
 	// Check conditions
@@ -248,29 +259,10 @@ func (v *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *types.Re
 
 		if currentValue != nil {
 			matched := types.EvaluateCondition(condition, currentValue)
-			v.logger.WithFields(logrus.Fields{
-				"matched":   matched,
-				"condition": condition,
-				"value":     currentValue,
-			}).Debug("Condition evaluation result")
-
 			if matched && condition.StopFlow {
-				response := ValidationResponse{
-					Success: false,
-					Message: condition.Message,
-				}
-
-				jsonResponse, err := json.Marshal(response)
-				if err != nil {
-					v.logger.WithError(err).Error("Failed to marshal validation response")
-					return fmt.Errorf("failed to marshal validation response: %w", err)
-				}
-
-				reqCtx.ValidationResponse = jsonResponse
-				reqCtx.StopForwarding = true
 				return &types.PluginError{
-					Message:    condition.Message,
 					StatusCode: http.StatusOK,
+					Message:    condition.Message,
 				}
 			}
 		}
@@ -279,35 +271,38 @@ func (v *ExternalValidator) ProcessRequest(ctx context.Context, reqCtx *types.Re
 	return nil
 }
 
-// Helper function to get nested value from map
-func getNestedValue(data map[string]interface{}, path []string, logger *logrus.Logger) interface{} {
-	if len(path) == 0 {
-		return nil
-	}
-
-	current := data
-	for i, key := range path {
-		if i == len(path)-1 {
-			// Last key, return the value
-			return current[key]
-		}
-
-		// Not the last key, move deeper
-		next, ok := current[key].(map[string]interface{})
-		if !ok {
-			logger.WithFields(logrus.Fields{
-				"key":   key,
-				"value": current[key],
-				"path":  path,
-			}).Debug("Failed to get nested value")
-			return nil
-		}
-		current = next
-	}
-
+func (v *ExternalValidator) ProcessResponse(respCtx *types.ResponseContext, pluginCtx *types.PluginContext) error {
+	// Add any response processing logic here
 	return nil
 }
 
-func (v *ExternalValidator) ProcessResponse(ctx context.Context, respCtx *types.ResponseContext) error {
+func getNestedValue(data map[string]interface{}, path []string, logger *logrus.Logger) interface{} {
+	current := data
+	for i, key := range path {
+		if i == len(path)-1 {
+			return current[key]
+		}
+		if next, ok := current[key].(map[string]interface{}); ok {
+			current = next
+		} else {
+			logger.WithFields(logrus.Fields{
+				"path": path,
+				"key":  key,
+			}).Debug("Failed to navigate nested value")
+			return nil
+		}
+	}
 	return nil
+}
+
+// Add Configure method
+func (v *ExternalValidator) Configure(config types.PluginConfig) error {
+	// Configuration is already handled in NewExternalValidator
+	// This is just to satisfy the Plugin interface
+	return nil
+}
+
+// Add GetName method
+func (v *ExternalValidator) GetName() string {
+	return "external_validator"
 }

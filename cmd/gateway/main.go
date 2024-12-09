@@ -8,9 +8,9 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 
-	"ai-gateway/internal/cache"
-	"ai-gateway/internal/database"
-	"ai-gateway/internal/server"
+	"ai-gateway-ce/internal/cache"
+	"ai-gateway-ce/internal/database"
+	"ai-gateway-ce/internal/server"
 )
 
 type AppConfig struct {
@@ -54,9 +54,9 @@ func main() {
 	// Set up logging to file
 	var logFile string
 	if serverType == "admin" {
-		logFile = "admin.log"
+		logFile = "logs/admin.log"
 	} else {
-		logFile = "proxy.log"
+		logFile = "logs/proxy.log"
 	}
 
 	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)

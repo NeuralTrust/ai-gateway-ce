@@ -2,172 +2,188 @@ package plugins
 
 import (
 	"fmt"
-	"reflect"
+	"sort"
 	"sync"
-
-	"ai-gateway/internal/types"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/sirupsen/logrus"
+
+	"ai-gateway-ce/internal/types"
 )
 
 type Manager struct {
-	factory  *Factory
-	registry *Registry
-	logger   *logrus.Logger
+	logger     *logrus.Logger
+	redis      *redis.Client
+	pluginPool *sync.Pool
+	plugins    map[string]types.Plugin
+	factory    *Factory
+	mu         sync.RWMutex
 }
 
-func NewManager(logger *logrus.Logger, redisClient *redis.Client) *Manager {
+func NewManager(logger *logrus.Logger, redis *redis.Client) *Manager {
 	return &Manager{
-		factory:  NewFactory(logger, redisClient),
-		registry: NewRegistry(),
-		logger:   logger,
+		logger: logger,
+		redis:  redis,
+		pluginPool: &sync.Pool{
+			New: func() interface{} {
+				return make(map[string]interface{})
+			},
+		},
+		plugins: make(map[string]types.Plugin),
+		factory: NewFactory(logger, redis),
 	}
 }
 
-func (m *Manager) GetOrCreatePlugin(name string, config types.PluginConfig) (Plugin, error) {
-	m.logger.WithFields(logrus.Fields{
-		"plugin": name,
-	}).Debug("Getting or creating plugin")
+func (m *Manager) getPlugin(name string, config types.PluginConfig) (types.Plugin, error) {
+	m.mu.RLock()
+	if plugin, exists := m.plugins[name]; exists {
+		m.mu.RUnlock()
+		return plugin, nil
+	}
+	m.mu.RUnlock()
 
-	if plugin, exists := m.registry.GetPlugin(name); exists {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check again in case another goroutine created it
+	if plugin, exists := m.plugins[name]; exists {
 		return plugin, nil
 	}
 
+	// Create new plugin using factory
 	plugin, err := m.factory.CreatePlugin(name, config)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create plugin %s: %w", name, err)
 	}
 
-	if err := m.registry.RegisterPlugin(name, plugin); err != nil {
-		return nil, err
-	}
-
+	m.plugins[name] = plugin
 	return plugin, nil
 }
 
-func (m *Manager) ExecutePlugins(plugins []types.PluginConfig, ctx interface{}) error {
-	var serialPlugins, parallelPlugins []types.PluginConfig
-	for _, pc := range plugins {
-		if pc.Parallel {
-			parallelPlugins = append(parallelPlugins, pc)
-		} else {
-			serialPlugins = append(serialPlugins, pc)
-		}
+func (m *Manager) executePlugin(plugin types.Plugin, config types.PluginConfig, reqCtx *types.RequestContext, respCtx *types.ResponseContext) error {
+	// Configure plugin if needed
+	if err := plugin.Configure(config); err != nil {
+		return fmt.Errorf("failed to configure plugin %s: %w", config.Name, err)
 	}
 
-	// Execute serial plugins first
-	for _, config := range serialPlugins {
-		if !config.Enabled {
+	pluginCtx := &types.PluginContext{
+		Config:   config,
+		Redis:    m.redis,
+		Logger:   m.logger,
+		Metadata: make(map[string]interface{}),
+	}
+
+	if reqCtx != nil {
+		if err := plugin.ProcessRequest(reqCtx, pluginCtx); err != nil {
+			// Don't wrap PluginError to preserve status code
+			if pluginErr, ok := err.(*types.PluginError); ok {
+				return pluginErr
+			}
+			return fmt.Errorf("plugin %s error: %w", config.Name, err)
+		}
+	}
+	if respCtx != nil {
+		if err := plugin.ProcessResponse(respCtx, pluginCtx); err != nil {
+			// Don't wrap PluginError to preserve status code
+			if pluginErr, ok := err.(*types.PluginError); ok {
+				return pluginErr
+			}
+			return fmt.Errorf("plugin %s error: %w", config.Name, err)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) ExecutePlugins(pluginChain []types.PluginConfig, reqCtx *types.RequestContext, respCtx *types.ResponseContext) error {
+	if len(pluginChain) == 0 {
+		return nil
+	}
+
+	// Sort plugins by priority and stage
+	sort.SliceStable(pluginChain, func(i, j int) bool {
+		if pluginChain[i].Stage != pluginChain[j].Stage {
+			return pluginChain[i].Stage < pluginChain[j].Stage
+		}
+		return pluginChain[i].Priority < pluginChain[j].Priority
+	})
+
+	// Group plugins by stage
+	stageGroups := make(map[string][]types.PluginConfig)
+	for _, plugin := range pluginChain {
+		if !plugin.Enabled {
+			continue
+		}
+		stageGroups[plugin.Stage] = append(stageGroups[plugin.Stage], plugin)
+	}
+
+	// Execute plugins in stage order
+	stages := []string{"pre_request", "post_request", "pre_response", "post_response"}
+	for _, stage := range stages {
+		plugins := stageGroups[stage]
+		if len(plugins) == 0 {
 			continue
 		}
 
-		m.logger.WithFields(logrus.Fields{
-			"plugin":   config.Name,
-			"settings": config.Settings,
-		}).Debug("Executing serial plugin")
-
-		plugin, err := m.GetOrCreatePlugin(config.Name, config)
-		if err != nil {
-			return err
+		// Group plugins by parallel capability
+		var serialPlugins, parallelPlugins []types.PluginConfig
+		for _, p := range plugins {
+			if p.Parallel {
+				parallelPlugins = append(parallelPlugins, p)
+			} else {
+				serialPlugins = append(serialPlugins, p)
+			}
 		}
 
-		if err := m.executePlugin(plugin, ctx); err != nil {
-			if pluginErr, ok := err.(*types.PluginError); ok {
-				m.logger.WithFields(logrus.Fields{
-					"plugin":      config.Name,
-					"status_code": pluginErr.StatusCode,
-					"message":     pluginErr.Message,
-				}).Warn("Plugin error")
-				return err
-			}
-			if reqCtx, ok := ctx.(*types.RequestContext); ok && reqCtx.StopForwarding {
-				m.logger.WithError(err).Warn("Plugin requested to stop forwarding")
-				return err
-			}
-			m.logger.WithError(err).Error("Plugin execution error")
-			return err
-		}
-	}
+		// Execute parallel plugins
+		if len(parallelPlugins) > 0 {
+			var wg sync.WaitGroup
+			errChan := make(chan error, len(parallelPlugins))
 
-	// Execute parallel plugins only if no serial plugin stopped the flow
-	if reqCtx, ok := ctx.(*types.RequestContext); ok && reqCtx.StopForwarding {
-		return fmt.Errorf("request forwarding stopped by plugin")
-	}
+			for _, p := range parallelPlugins {
+				wg.Add(1)
+				go func(config types.PluginConfig) {
+					defer wg.Done()
+					plugin, err := m.getPlugin(config.Name, config)
+					if err != nil {
+						errChan <- fmt.Errorf("plugin %s error: %w", config.Name, err)
+						return
+					}
 
-	// Execute parallel plugins
-	if len(parallelPlugins) > 0 {
-		errChan := make(chan error, len(parallelPlugins))
-		var wg sync.WaitGroup
-
-		for _, config := range parallelPlugins {
-			if !config.Enabled {
-				continue
+					if err := m.executePlugin(plugin, config, reqCtx, respCtx); err != nil {
+						// Don't wrap PluginError to preserve status code
+						if pluginErr, ok := err.(*types.PluginError); ok {
+							errChan <- pluginErr
+						} else {
+							errChan <- fmt.Errorf("plugin %s error: %w", config.Name, err)
+						}
+					}
+				}(p)
 			}
 
-			wg.Add(1)
-			go func(pc types.PluginConfig) {
-				defer wg.Done()
+			// Wait for all parallel plugins to complete
+			wg.Wait()
+			close(errChan)
 
-				m.logger.WithFields(logrus.Fields{
-					"plugin":   pc.Name,
-					"settings": pc.Settings,
-				}).Debug("Executing parallel plugin")
-
-				plugin, err := m.GetOrCreatePlugin(pc.Name, pc)
+			// Check for errors
+			for err := range errChan {
 				if err != nil {
-					errChan <- err
-					return
-				}
-
-				if err := m.executePlugin(plugin, ctx); err != nil {
-					errChan <- err
-					return
-				}
-			}(config)
-		}
-
-		// Wait for all parallel plugins to complete
-		wg.Wait()
-		close(errChan)
-
-		// Check for any errors from parallel plugins
-		for err := range errChan {
-			if err != nil {
-				if pluginErr, ok := err.(*types.PluginError); ok {
-					m.logger.WithFields(logrus.Fields{
-						"status_code": pluginErr.StatusCode,
-						"message":     pluginErr.Message,
-					}).Warn("Parallel plugin error")
 					return err
 				}
-				m.logger.WithError(err).Error("Parallel plugin execution error")
+			}
+		}
+
+		// Execute serial plugins
+		for _, config := range serialPlugins {
+			plugin, err := m.getPlugin(config.Name, config)
+			if err != nil {
+				return fmt.Errorf("plugin %s error: %w", config.Name, err)
+			}
+
+			if err := m.executePlugin(plugin, config, reqCtx, respCtx); err != nil {
 				return err
 			}
 		}
 	}
 
 	return nil
-}
-
-func (m *Manager) executePlugin(plugin Plugin, ctx interface{}) error {
-	switch v := ctx.(type) {
-	case *types.RequestContext:
-		return plugin.ProcessRequest(v.Ctx, v)
-	case *types.ResponseContext:
-		return plugin.ProcessResponse(v.Ctx, v)
-	default:
-		return fmt.Errorf("unknown context type")
-	}
-}
-
-func (m *Manager) ValidatePluginConfig(plugins interface{}) (interface{}, error) {
-	// If plugins is nil or empty bytes, return empty object
-	if plugins == nil || (reflect.TypeOf(plugins).Kind() == reflect.Slice && reflect.ValueOf(plugins).Len() == 0) {
-		return map[string]interface{}{}, nil
-	}
-
-	// Add proper validation for plugins data
-	// Return cleaned/validated plugins configuration
-	return plugins, nil
 }

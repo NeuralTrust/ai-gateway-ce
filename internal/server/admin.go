@@ -2,25 +2,45 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
-	"ai-gateway/internal/cache"
-	"ai-gateway/internal/database"
-	"ai-gateway/internal/types"
-	"ai-gateway/internal/utils"
-	"crypto/rand"
-	"encoding/base64"
-	"regexp"
-	"strings"
+	"ai-gateway-ce/internal/cache"
+	"ai-gateway-ce/internal/database"
+	"ai-gateway-ce/internal/types"
+	"ai-gateway-ce/internal/utils"
 )
+
+// Helper functions for header conversion
+func convertHeadersToMap(headers []string) map[string]string {
+	result := make(map[string]string)
+	for _, header := range headers {
+		parts := strings.SplitN(header, ":", 2)
+		if len(parts) == 2 {
+			result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return result
+}
+
+func convertHeadersToSlice(headers map[string]string) []string {
+	var result []string
+	for k, v := range headers {
+		result = append(result, fmt.Sprintf("%s:%s", k, v))
+	}
+	return result
+}
 
 type AdminServer struct {
 	*BaseServer
@@ -69,12 +89,7 @@ func (s *AdminServer) setupRoutes() {
 }
 
 func (s *AdminServer) Run() error {
-	// Initialize cache with gateways list
-	if err := s.updateGatewaysList(&gin.Context{}); err != nil {
-		s.logger.WithError(err).Error("Failed to initialize gateways cache")
-	}
-
-	s.setupRoutes()
+	s.setupHealthCheck()
 	return s.router.Run(fmt.Sprintf(":%d", s.config.AdminPort))
 }
 
@@ -421,8 +436,8 @@ func (s *AdminServer) updateGateway(c *gin.Context) {
 		ApiKey:          dbGateway.ApiKey,
 		Status:          dbGateway.Status,
 		Tier:            dbGateway.Tier,
-		CreatedAt:       dbGateway.CreatedAt,
-		UpdatedAt:       dbGateway.UpdatedAt,
+		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
 		EnabledPlugins:  []string(dbGateway.EnabledPlugins),
 		RequiredPlugins: requiredPlugins,
 	}
@@ -692,39 +707,12 @@ func (s *AdminServer) createForwardingRule(c *gin.Context) {
 		methods = []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
 	}
 
-	// Initialize headers array with empty JSON array
-	headersJSON, err := json.Marshal([]string{})
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to marshal empty headers")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process headers"})
-		return
+	// Convert headers to JSON map if provided, otherwise use empty map
+	headers := make(map[string]string)
+	if req.Headers != nil {
+		headers = req.Headers
 	}
-
-	var headers database.StringArray
-	if err := headers.Scan(headersJSON); err != nil {
-		s.logger.WithError(err).Error("Failed to initialize headers")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process headers"})
-		return
-	}
-
-	// Add headers if provided
-	if len(req.Headers) > 0 {
-		var headersList []string
-		for k, v := range req.Headers {
-			headersList = append(headersList, fmt.Sprintf("%s:%s", k, v))
-		}
-		headersJSON, err := json.Marshal(headersList)
-		if err != nil {
-			s.logger.WithError(err).Error("Failed to marshal headers")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process headers"})
-			return
-		}
-		if err := headers.Scan(headersJSON); err != nil {
-			s.logger.WithError(err).Error("Failed to scan headers")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process headers"})
-			return
-		}
-	}
+	dbHeaders := convertMapToDBJSONMap(headers)
 
 	// Convert plugin chain to JSON array
 	pluginChainJSON, err := json.Marshal(req.PluginChain)
@@ -734,9 +722,9 @@ func (s *AdminServer) createForwardingRule(c *gin.Context) {
 		return
 	}
 
-	var pluginChainArray database.JSONArray
-	if err := pluginChainArray.Scan(pluginChainJSON); err != nil {
-		s.logger.WithError(err).Error("Failed to convert plugin chain to database format")
+	var dbPluginChain database.JSONArray
+	if err := dbPluginChain.Scan(pluginChainJSON); err != nil {
+		s.logger.WithError(err).Error("Failed to scan plugin chain")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin configuration"})
 		return
 	}
@@ -747,11 +735,11 @@ func (s *AdminServer) createForwardingRule(c *gin.Context) {
 		Path:          req.Path,
 		Target:        req.Target,
 		Methods:       database.StringArray(methods),
-		Headers:       headers,
+		Headers:       dbHeaders,
 		StripPath:     req.StripPath != nil && *req.StripPath,
 		PreserveHost:  req.PreserveHost != nil && *req.PreserveHost,
 		RetryAttempts: defaultIfNil(req.RetryAttempts, 0),
-		PluginChain:   pluginChainArray,
+		PluginChain:   dbPluginChain,
 		Active:        true,
 		Public:        false,
 		CreatedAt:     time.Now(),
@@ -765,7 +753,7 @@ func (s *AdminServer) createForwardingRule(c *gin.Context) {
 	// Store in database
 	if err := s.repo.CreateRule(c, rule); err != nil {
 		s.logger.WithError(err).Error("Failed to create rule")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to create rule: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create rule"})
 		return
 	}
 
@@ -774,8 +762,6 @@ func (s *AdminServer) createForwardingRule(c *gin.Context) {
 	// Update rules cache
 	if err := s.updateRulesCache(c, gatewayID); err != nil {
 		s.logger.WithError(err).Error("Failed to update rules cache")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update rules cache"})
-		return
 	}
 
 	s.logger.Info("Successfully updated rules cache")
@@ -788,27 +774,7 @@ func (s *AdminServer) createForwardingRule(c *gin.Context) {
 		return
 	}
 
-	response := &types.ForwardingRule{
-		ID:            rule.ID,
-		GatewayID:     rule.GatewayID,
-		Path:          rule.Path,
-		Target:        rule.Target,
-		Methods:       []string(rule.Methods),
-		Headers:       []string(rule.Headers),
-		StripPath:     rule.StripPath,
-		PreserveHost:  rule.PreserveHost,
-		RetryAttempts: rule.RetryAttempts,
-		PluginChain:   pluginChain,
-		Active:        rule.Active,
-		Public:        rule.Public,
-		CreatedAt:     rule.CreatedAt,
-		UpdatedAt:     rule.UpdatedAt,
-	}
-
-	s.logger.WithFields(logrus.Fields{
-		"response": response,
-	}).Info("Sending response")
-
+	response := s.getRuleResponse(rule)
 	c.JSON(http.StatusCreated, response)
 }
 
@@ -816,11 +782,17 @@ func (s *AdminServer) listForwardingRules(c *gin.Context) {
 	gatewayID := c.Param("gateway_id")
 
 	// Get rules from database
-	rules, err := s.repo.ListRules(c, gatewayID)
+	dbRules, err := s.repo.ListRules(c, gatewayID)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to list rules")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list rules"})
 		return
+	}
+
+	// Convert to API response type
+	var rules []types.ForwardingRule
+	for _, dbRule := range dbRules {
+		rules = append(rules, s.getRuleResponse(&dbRule))
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -834,22 +806,9 @@ func (s *AdminServer) updateForwardingRule(c *gin.Context) {
 	ruleID := c.Param("rule_id")
 
 	// Get existing rule
-	rules, err := s.getForwardingRules(c, gatewayID)
+	dbRule, err := s.repo.GetRule(c, ruleID, gatewayID)
 	if err != nil {
-		s.logger.WithError(err).Error("Failed to get rules")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update rule"})
-		return
-	}
-
-	var rule *types.ForwardingRule
-	for i := range rules {
-		if rules[i].ID == ruleID {
-			rule = &rules[i]
-			break
-		}
-	}
-
-	if rule == nil {
+		s.logger.WithError(err).Error("Failed to get rule")
 		c.JSON(http.StatusNotFound, gin.H{"error": "Rule not found"})
 		return
 	}
@@ -862,47 +821,63 @@ func (s *AdminServer) updateForwardingRule(c *gin.Context) {
 
 	// Update fields if provided
 	if req.Path != "" {
-		rule.Path = req.Path
+		dbRule.Path = req.Path
 	}
 	if req.Target != "" {
-		rule.Target = req.Target
+		dbRule.Target = req.Target
 	}
 	if len(req.Methods) > 0 {
-		rule.Methods = req.Methods
+		dbRule.Methods = database.StringArray(req.Methods)
 	}
 	if req.Headers != nil {
-		var headers []string
-		for k, v := range req.Headers {
-			headers = append(headers, fmt.Sprintf("%s:%s", k, v))
-		}
-		rule.Headers = headers
+		dbRule.Headers = convertMapToDBJSONMap(req.Headers)
 	}
 	if req.StripPath != nil {
-		rule.StripPath = *req.StripPath
+		dbRule.StripPath = *req.StripPath
 	}
 	if req.PreserveHost != nil {
-		rule.PreserveHost = *req.PreserveHost
+		dbRule.PreserveHost = *req.PreserveHost
 	}
 	if req.RetryAttempts != nil {
-		rule.RetryAttempts = *req.RetryAttempts
+		dbRule.RetryAttempts = *req.RetryAttempts
 	}
 	if req.Active != nil {
-		rule.Active = *req.Active
+		dbRule.Active = *req.Active
 	}
 	if len(req.PluginChain) > 0 {
-		rule.PluginChain = req.PluginChain
+		pluginChainJSON, err := json.Marshal(req.PluginChain)
+		if err != nil {
+			s.logger.WithError(err).Error("Failed to marshal plugin chain")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin configuration"})
+			return
+		}
+
+		var dbPluginChain database.JSONArray
+		if err := dbPluginChain.Scan(pluginChainJSON); err != nil {
+			s.logger.WithError(err).Error("Failed to scan plugin chain")
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin configuration"})
+			return
+		}
+		dbRule.PluginChain = dbPluginChain
 	}
 
-	rule.UpdatedAt = time.Now()
+	dbRule.UpdatedAt = time.Now()
 
-	// Save updated rules
-	if err := s.saveForwardingRules(c, gatewayID, rules); err != nil {
-		s.logger.WithError(err).Error("Failed to save rules")
+	// Save updated rule
+	if err := s.repo.UpdateRule(c, dbRule); err != nil {
+		s.logger.WithError(err).Error("Failed to update rule")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update rule"})
 		return
 	}
 
-	c.JSON(http.StatusOK, rule)
+	// Update rules cache
+	if err := s.updateRulesCache(c, gatewayID); err != nil {
+		s.logger.WithError(err).Error("Failed to update rules cache")
+	}
+
+	// Convert response
+	response := s.getRuleResponse(dbRule)
+	c.JSON(http.StatusOK, response)
 }
 
 func (s *AdminServer) deleteForwardingRule(c *gin.Context) {
@@ -1037,15 +1012,15 @@ func (s *AdminServer) updateRulesCache(c *gin.Context, gatewayID string) error {
 			Path:          rule.Path,
 			Target:        rule.Target,
 			Methods:       []string(rule.Methods),
-			Headers:       []string(rule.Headers),
+			Headers:       convertDBJSONMapToMap(rule.Headers),
 			StripPath:     rule.StripPath,
 			PreserveHost:  rule.PreserveHost,
 			RetryAttempts: rule.RetryAttempts,
 			PluginChain:   pluginChain,
 			Active:        rule.Active,
 			Public:        rule.Public,
-			CreatedAt:     rule.CreatedAt,
-			UpdatedAt:     rule.UpdatedAt,
+			CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
 		}
 
 		s.logger.WithFields(logrus.Fields{
@@ -1103,8 +1078,8 @@ func (s *AdminServer) getGatewayByID(c *gin.Context) {
 		ApiKey:          dbGateway.ApiKey,
 		Status:          dbGateway.Status,
 		Tier:            dbGateway.Tier,
-		CreatedAt:       dbGateway.CreatedAt,
-		UpdatedAt:       dbGateway.UpdatedAt,
+		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
 		EnabledPlugins:  []string(dbGateway.EnabledPlugins),
 		RequiredPlugins: requiredPlugins,
 	}
@@ -1205,8 +1180,8 @@ func (s *AdminServer) convertDBGatewayToAPI(dbGateway *database.Gateway) (*types
 		ApiKey:          dbGateway.ApiKey,
 		Status:          dbGateway.Status,
 		Tier:            dbGateway.Tier,
-		CreatedAt:       dbGateway.CreatedAt,
-		UpdatedAt:       dbGateway.UpdatedAt,
+		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
 		EnabledPlugins:  []string(dbGateway.EnabledPlugins),
 		RequiredPlugins: requiredPlugins,
 	}, nil
@@ -1293,4 +1268,95 @@ func validateGatewayID(id string) error {
 	}
 
 	return nil
+}
+
+func (s *AdminServer) getRuleResponse(rule *database.ForwardingRule) types.ForwardingRule {
+	var pluginChain []types.PluginConfig
+	if err := json.Unmarshal([]byte(rule.PluginChain), &pluginChain); err != nil {
+		s.logger.WithError(err).Error("Failed to unmarshal plugin chain")
+		pluginChain = make([]types.PluginConfig, 0)
+	}
+
+	return types.ForwardingRule{
+		ID:            rule.ID,
+		GatewayID:     rule.GatewayID,
+		Path:          rule.Path,
+		Target:        rule.Target,
+		Methods:       []string(rule.Methods),
+		Headers:       convertDBJSONMapToMap(rule.Headers),
+		StripPath:     rule.StripPath,
+		PreserveHost:  rule.PreserveHost,
+		RetryAttempts: rule.RetryAttempts,
+		PluginChain:   pluginChain,
+		Active:        rule.Active,
+		Public:        rule.Public,
+		CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+func convertDBJSONMapToMap(headers database.JSONMap) map[string]string {
+	result := make(map[string]string)
+	var rawMap map[string]interface{}
+	if err := json.Unmarshal([]byte(headers), &rawMap); err != nil {
+		return result
+	}
+	for k, v := range rawMap {
+		if strVal, ok := v.(string); ok {
+			result[k] = strVal
+		}
+	}
+	return result
+}
+
+func convertMapToDBJSONMap(headers map[string]string) database.JSONMap {
+	data, err := json.Marshal(headers)
+	if err != nil {
+		return database.JSONMap("{}")
+	}
+	return database.JSONMap(data)
+}
+
+func dbToGateway(dbGateway *database.Gateway) types.Gateway {
+	var requiredPlugins map[string]types.PluginConfig
+	if err := json.Unmarshal([]byte(dbGateway.RequiredPlugins), &requiredPlugins); err != nil {
+		requiredPlugins = make(map[string]types.PluginConfig)
+	}
+
+	return types.Gateway{
+		ID:              dbGateway.ID,
+		Name:            dbGateway.Name,
+		Subdomain:       dbGateway.Subdomain,
+		ApiKey:          dbGateway.ApiKey,
+		Status:          dbGateway.Status,
+		Tier:            dbGateway.Tier,
+		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
+		EnabledPlugins:  []string(dbGateway.EnabledPlugins),
+		RequiredPlugins: requiredPlugins,
+	}
+}
+
+func dbToRule(dbRule *database.ForwardingRule) types.ForwardingRule {
+	var pluginChain []types.PluginConfig
+	if err := json.Unmarshal([]byte(dbRule.PluginChain), &pluginChain); err != nil {
+		pluginChain = make([]types.PluginConfig, 0)
+	}
+
+	return types.ForwardingRule{
+		ID:            dbRule.ID,
+		GatewayID:     dbRule.GatewayID,
+		Path:          dbRule.Path,
+		Target:        dbRule.Target,
+		Methods:       []string(dbRule.Methods),
+		Headers:       convertDBJSONMapToMap(dbRule.Headers),
+		StripPath:     dbRule.StripPath,
+		PreserveHost:  dbRule.PreserveHost,
+		RetryAttempts: dbRule.RetryAttempts,
+		PluginChain:   pluginChain,
+		Active:        dbRule.Active,
+		Public:        dbRule.Public,
+		CreatedAt:     dbRule.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:     dbRule.UpdatedAt.Format(time.RFC3339),
+	}
 }

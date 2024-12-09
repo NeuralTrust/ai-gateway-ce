@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"ai-gateway/internal/types"
+	"ai-gateway-ce/internal/types"
 )
 
 type Gateway struct {
@@ -29,7 +29,7 @@ type ForwardingRule struct {
 	Path          string      `db:"path"`
 	Target        string      `db:"target"`
 	Methods       StringArray `db:"methods"`
-	Headers       StringArray `db:"headers"`
+	Headers       JSONMap     `db:"headers"`
 	StripPath     bool        `db:"strip_path"`
 	PreserveHost  bool        `db:"preserve_host"`
 	RetryAttempts int         `db:"retry_attempts"`
