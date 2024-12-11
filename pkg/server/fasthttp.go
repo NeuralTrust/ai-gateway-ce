@@ -4,7 +4,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sirupsen/logrus"
 	"github.com/valyala/fasthttp"
 )
 
@@ -33,14 +32,3 @@ var (
 		},
 	}
 )
-
-// Add proper log formatting
-func logRequest(logger *logrus.Logger, ctx *fasthttp.RequestCtx, requestID, gatewayID string) {
-	logger.WithFields(logrus.Fields{
-		"request_id": requestID,
-		"method":     string(ctx.Method()),
-		"path":       string(ctx.Path()),
-		"gateway_id": gatewayID,
-		// Add other relevant fields...
-	}).Info("Processing request")
-}

@@ -2,16 +2,17 @@ package database
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
-	"time"
 
-	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
+	"ai-gateway-ce/internal/models"
+
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 type DB struct {
-	db *sqlx.DB
+	*gorm.DB
 }
 
 type Config struct {
@@ -23,51 +24,47 @@ type Config struct {
 	SSLMode  string
 }
 
-func NewDB(config *Config) (*DB, error) {
-	connStr := fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		config.Host,
-		config.Port,
-		config.User,
-		config.Password,
-		config.DBName,
-		config.SSLMode,
-	)
+func NewDB(cfg *Config) (*DB, error) {
+	dsn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, cfg.SSLMode)
 
-	db, err := sqlx.Connect("postgres", connStr)
+	gormDB, err := gorm.Open(postgres.Open(dsn), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Error).LogMode(logger.Info).LogMode(logger.Warn),
+	})
 	if err != nil {
-		return nil, fmt.Errorf("error connecting to database: %v", err)
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	// Set connection pool settings
-	db.SetMaxOpenConns(25)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
+	// Auto-migrate the schema
+	if err := gormDB.AutoMigrate(
+		&models.Gateway{},
+		&models.ForwardingRule{},
+		&models.APIKey{},
+	); err != nil {
+		return nil, fmt.Errorf("failed to auto-migrate schema: %w", err)
+	}
 
-	return &DB{db: db}, nil
+	return &DB{
+		DB: gormDB,
+	}, nil
 }
 
 func (db *DB) Close() error {
-	return db.db.Close()
+	sqlDB, err := db.DB.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }
 
-// Add methods to access sqlx functionality
-func (db *DB) NamedExecContext(ctx interface{}, query string, arg interface{}) (sql.Result, error) {
-	return db.db.NamedExecContext(ctx.(context.Context), query, arg)
+// IsSubdomainAvailable checks if a subdomain is available
+func (db *DB) IsSubdomainAvailable(ctx context.Context, subdomain string) (bool, error) {
+	var count int64
+	err := db.DB.Model(&Gateway{}).Where("subdomain = ?", subdomain).Count(&count).Error
+	if err != nil {
+		return false, fmt.Errorf("failed to check subdomain: %w", err)
+	}
+	return count == 0, nil
 }
 
-func (db *DB) GetContext(ctx interface{}, dest interface{}, query string, args ...interface{}) error {
-	return db.db.GetContext(ctx.(context.Context), dest, query, args...)
-}
-
-func (db *DB) SelectContext(ctx interface{}, dest interface{}, query string, args ...interface{}) error {
-	return db.db.SelectContext(ctx.(context.Context), dest, query, args...)
-}
-
-func (db *DB) ExecContext(ctx interface{}, query string, args ...interface{}) (sql.Result, error) {
-	return db.db.ExecContext(ctx.(context.Context), query, args...)
-}
-
-func (db *DB) Ping() error {
-	return db.db.Ping()
-}
+// Add other GORM-based methods as needed...

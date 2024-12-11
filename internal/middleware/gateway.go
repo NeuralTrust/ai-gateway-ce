@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"ai-gateway/internal/cache"
+	"ai-gateway-ce/internal/cache"
 	"fmt"
 	"strings"
 
@@ -96,7 +96,6 @@ func (m *GatewayMiddleware) IdentifyGateway() gin.HandlerFunc {
 		}).Debug("Found gateway")
 
 		c.Set(GatewayContextKey, gatewayID)
-		c.Next()
 	}
 }
 

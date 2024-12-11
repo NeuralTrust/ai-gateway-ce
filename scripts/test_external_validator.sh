@@ -20,7 +20,7 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "External Validator Company",
-    "subdomain": "ext-validator-26",
+    "subdomain": "ext-validator-29",
     "tier": "basic",
     "enabled_plugins": ["external_validator"]
   }')
@@ -28,9 +28,34 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
 # Extract fields from response
 GATEWAY_ID=$(echo $GATEWAY_RESPONSE | jq -r '.ID // .id')
 SUBDOMAIN=$(echo $GATEWAY_RESPONSE | jq -r '.Subdomain // .subdomain')
-API_KEY=$(echo $GATEWAY_RESPONSE | jq -r '.ApiKey // .api_key')
 
-echo -e "${GREEN}Successfully created gateway:${NC}"
+# Check if gateway creation was successful
+if [ -z "$GATEWAY_ID" ] || [ "$GATEWAY_ID" = "null" ]; then
+    echo -e "${RED}Failed to create gateway. Response: $GATEWAY_RESPONSE${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Successfully created gateway with ID: $GATEWAY_ID${NC}"
+
+# Create API key for the gateway
+echo -e "${GREEN}Creating API key for the gateway...${NC}"
+API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/keys" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Test External Validator Key",
+    "expires_at": null
+  }')
+
+# Extract API key from response
+API_KEY=$(echo $API_KEY_RESPONSE | jq -r '.key')
+
+# Check if API key creation was successful
+if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
+    echo -e "${RED}Failed to create API key. Response: $API_KEY_RESPONSE${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Successfully created API key:${NC}"
 echo -e "Gateway ID: $GATEWAY_ID"
 echo -e "API Key: $API_KEY"
 

@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"fmt"
+	"sync"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/sirupsen/logrus"
@@ -12,33 +13,32 @@ import (
 )
 
 type Factory struct {
-	logger      *logrus.Logger
-	redisClient *redis.Client
+	redis  *redis.Client
+	logger *logrus.Logger
+	cache  sync.Map // map[string]types.Plugin
 }
 
 func NewFactory(logger *logrus.Logger, redisClient *redis.Client) *Factory {
 	return &Factory{
-		logger:      logger,
-		redisClient: redisClient,
+		logger: logger,
+		redis:  redisClient,
 	}
 }
 
 func (f *Factory) CreatePlugin(name string, config types.PluginConfig) (types.Plugin, error) {
-	f.logger.WithFields(logrus.Fields{
-		"plugin": name,
-		"config": config,
-	}).Debug("Creating plugin")
+	// Check cache first
+	if plugin, ok := f.cache.Load(name); ok {
+		if err := plugin.(types.Plugin).Configure(config); err != nil {
+			return nil, err
+		}
+		return plugin.(types.Plugin), nil
+	}
 
 	var plugin types.Plugin
 
 	switch name {
 	case "rate_limiter":
-		limiter := rate_limiter.NewRateLimiter(f.redisClient, f.logger)
-		if err := limiter.Configure(config); err != nil {
-			f.logger.WithError(err).Error("Failed to configure rate limiter")
-			return nil, err
-		}
-		plugin = limiter
+		plugin = rate_limiter.NewRateLimiter(f.redis, f.logger)
 	case "external_validator":
 		validator, err := external.NewExternalValidator(f.logger, config)
 		if err != nil {
@@ -50,6 +50,11 @@ func (f *Factory) CreatePlugin(name string, config types.PluginConfig) (types.Pl
 		return nil, fmt.Errorf("unknown plugin: %s", name)
 	}
 
-	f.logger.WithField("plugin", name).Debug("Created plugin")
+	if err := plugin.Configure(config); err != nil {
+		return nil, err
+	}
+
+	// Cache the plugin instance
+	f.cache.Store(name, plugin)
 	return plugin, nil
 }

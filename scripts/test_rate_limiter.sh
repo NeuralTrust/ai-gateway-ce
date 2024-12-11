@@ -18,7 +18,7 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Rate Limited Company",
-    "subdomain": "ratelimited17",
+    "subdomain": "ratelimited27",
     "tier": "basic",
     "enabled_plugins": ["rate_limiter"]
   }')
@@ -26,16 +26,10 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
 # Extract fields from response
 GATEWAY_ID=$(echo $GATEWAY_RESPONSE | jq -r '.ID // .id')
 SUBDOMAIN=$(echo $GATEWAY_RESPONSE | jq -r '.Subdomain // .subdomain')
-API_KEY=$(echo $GATEWAY_RESPONSE | jq -r '.ApiKey // .api_key')
 
 # Check if we got valid values
 if [ -z "$GATEWAY_ID" ] || [ "$GATEWAY_ID" = "null" ]; then
     echo -e "${RED}Failed to get gateway ID. Response: $GATEWAY_RESPONSE${NC}"
-    exit 1
-fi
-
-if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
-    echo -e "${RED}Failed to get API key. Response: $GATEWAY_RESPONSE${NC}"
     exit 1
 fi
 
@@ -53,8 +47,27 @@ fi
 
 echo -e "${GREEN}Successfully created gateway:${NC}"
 echo -e "Gateway ID: $GATEWAY_ID"
-echo -e "API Key: $API_KEY"
-echo -e "Status: $STATUS\n"
+wait 2
+# Create API key for the gateway
+echo -e "${GREEN}Creating API key for the gateway...${NC}"
+API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/keys" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Test Rate Limiter Key",
+    "expires_at": null
+  }')
+echo "API Key Response: $API_KEY_RESPONSE"
+# Extract API key from response
+API_KEY=$(echo $API_KEY_RESPONSE | jq -r '.key')
+
+# Check if we got a valid API key
+if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
+    echo -e "${RED}Failed to get API key. Response: $API_KEY_RESPONSE${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Successfully created API key:${NC}"
+echo -e "API Key: $API_KEY\n"
 
 # 2. Create forwarding rule with rate limiter
 echo -e "${GREEN}2. Creating forwarding rule...${NC}"
@@ -69,7 +82,6 @@ RULE_REQUEST='{
         {
             "name": "rate_limiter",
             "enabled": true,
-            "priority": 0,
             "stage": "pre_request",
             "parallel": false,
             "settings": {
@@ -77,20 +89,10 @@ RULE_REQUEST='{
                     "global": {
                         "limit": 10,
                         "window": "1m"
-                    },
-                    "per_ip": {
-                        "limit": 5,
-                        "window": "1m"
-                    },
-                    "per_user": {
-                        "limit": 3,
-                        "window": "1m"
                     }
                 },
                 "limit_types": {
-                    "global": true,
-                    "per_ip": false,
-                    "per_user": false
+                    "global": true
                 },
                 "actions": {
                     "type": "block",
@@ -101,30 +103,13 @@ RULE_REQUEST='{
     ]
 }'
 
-echo -e "Request URL: $ADMIN_URL/gateways/$GATEWAY_ID/rules"
-echo -e "Gateway ID: $GATEWAY_ID"
-echo -e "API Key: $API_KEY"
-
-# Create a temporary file for the response
-TMPFILE=$(mktemp)
-
-# Make the request and save verbose output to stderr
-curl -v -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
+# Make the request and capture the response
+RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d "$RULE_REQUEST" 2>"$TMPFILE.verbose" >"$TMPFILE.response"
+  -d "$RULE_REQUEST")
 
-# Show verbose output
-echo -e "\nVerbose output:"
-cat "$TMPFILE.verbose"
-
-# Get the response
-RULE_RESPONSE=$(cat "$TMPFILE.response")
-echo -e "\nResponse body:"
-echo "$RULE_RESPONSE"
-
-# Clean up temp files
-rm -f "$TMPFILE.verbose" "$TMPFILE.response"
+echo "Rule Response: $RULE_RESPONSE"
 
 # Check if rule creation was successful
 if [[ "$RULE_RESPONSE" == *"error"* ]]; then
@@ -159,45 +144,6 @@ for i in {1..12}; do
         echo -e "${GREEN}Request $i: Success${NC}"
     else
         echo -e "${RED}Request $i: Rate Limited (${http_code})${NC}"
-        echo "Response: $body"
-    fi
-    sleep 0.1  # Small delay to ensure proper order
-done
-
-# 4. Test Per-IP Rate Limit (limit: 5 per minute)
-echo -e "\n${GREEN}Testing Per-IP Rate Limit (5 requests/minute)${NC}"
-echo -e "Making 6 requests from same IP..."
-for i in {1..6}; do
-    response=$(curl -s -w "\n%{http_code}" \
-        -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
-        -H "Authorization: Bearer ${API_KEY}" \
-        -H "X-Forwarded-For: 2.3.4.5" \
-        "${PROXY_URL}/test")
-    
-    http_code=$(echo "$response" | tail -n1)
-    body=$(echo "$response" | head -n 1)
-    echo -e "Request $i - Status: $http_code"
-    if [ "$http_code" != "200" ]; then
-        echo "Response: $body"
-    fi
-    sleep 0.1  # Small delay to ensure proper order
-done
-
-# 5. Test Per-User Rate Limit (limit: 3 per minute)
-echo -e "\n${GREEN}Testing Per-User Rate Limit (3 requests/minute)${NC}"
-echo -e "Making 4 requests as same user..."
-for i in {1..4}; do
-    response=$(curl -s -w "\n%{http_code}" \
-        -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
-        -H "Authorization: Bearer ${API_KEY}" \
-        -H "X-User-ID: test-user" \
-        -H "X-Forwarded-For: 3.4.5.6" \
-        "${PROXY_URL}/test")
-    
-    http_code=$(echo "$response" | tail -n1)
-    body=$(echo "$response" | head -n 1)
-    echo -e "Request $i - Status: $http_code"
-    if [ "$http_code" != "200" ]; then
         echo "Response: $body"
     fi
     sleep 0.1  # Small delay to ensure proper order

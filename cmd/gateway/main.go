@@ -10,7 +10,7 @@ import (
 
 	"ai-gateway-ce/internal/cache"
 	"ai-gateway-ce/internal/database"
-	"ai-gateway-ce/internal/server"
+	"ai-gateway-ce/pkg/server"
 )
 
 type AppConfig struct {
@@ -75,17 +75,6 @@ func main() {
 		logger.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Initialize cache
-	cache, err := cache.NewCache(cache.Config{
-		Host:     config.Redis.Host,
-		Port:     config.Redis.Port,
-		Password: config.Redis.Password,
-		DB:       config.Redis.DB,
-	})
-	if err != nil {
-		logger.Fatalf("Failed to initialize cache: %v", err)
-	}
-
 	// Initialize database
 	db, err := database.NewDB(&database.Config{
 		Host:     config.Database.Host,
@@ -100,8 +89,19 @@ func main() {
 	}
 	defer db.Close()
 
+	// Initialize cache with the database's GORM instance
+	cacheInstance, err := cache.NewCache(cache.Config{
+		Host:     config.Redis.Host,
+		Port:     config.Redis.Port,
+		Password: config.Redis.Password,
+		DB:       config.Redis.DB,
+	}, db.DB)
+	if err != nil {
+		logger.Fatalf("Failed to initialize cache: %v", err)
+	}
+
 	// Initialize repository
-	repo := database.NewRepository(db)
+	repo := database.NewRepository(db.DB, logger, cacheInstance)
 
 	// Create server config
 	serverConfig := &server.Config{
@@ -113,9 +113,9 @@ func main() {
 	var srv server.Server
 	switch serverType {
 	case "admin":
-		srv = server.NewAdminServer(serverConfig, cache, repo, logger)
+		srv = server.NewAdminServer(serverConfig, cacheInstance, repo, logger)
 	case "proxy":
-		srv = server.NewProxyServer(serverConfig, cache, repo, logger)
+		srv = server.NewProxyServer(serverConfig, cacheInstance, repo, logger)
 	default:
 		logger.Fatalf("Unknown server type: %s", serverType)
 	}

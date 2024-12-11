@@ -1,17 +1,15 @@
 package external
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strings"
 	"time"
 
 	"ai-gateway-ce/internal/types"
 
 	"github.com/sirupsen/logrus"
+	"github.com/valyala/fasthttp"
 )
 
 type ExternalValidator struct {
@@ -153,10 +151,12 @@ func (v *ExternalValidator) Parallel() bool {
 	return true
 }
 
-func (v *ExternalValidator) ProcessRequest(reqCtx *types.RequestContext, pluginCtx *types.PluginContext) error {
+func (v *ExternalValidator) ProcessRequest(reqCtx *types.RequestContext, respCtx *types.ResponseContext) error {
+	bodyBytes := reqCtx.Body // fasthttp request body
+
 	var originalBody map[string]interface{}
-	if len(reqCtx.Body) > 0 {
-		if err := json.Unmarshal(reqCtx.Body, &originalBody); err != nil {
+	if len(bodyBytes) > 0 {
+		if err := json.Unmarshal(bodyBytes, &originalBody); err != nil {
 			v.logger.WithError(err).Error("Failed to unmarshal request body")
 			return fmt.Errorf("invalid request body: %w", err)
 		}
@@ -172,73 +172,50 @@ func (v *ExternalValidator) ProcessRequest(reqCtx *types.RequestContext, pluginC
 		return fmt.Errorf("failed to create validation payload: %w", err)
 	}
 
-	// Create request
-	req, err := http.NewRequestWithContext(reqCtx.Context, v.method, v.endpoint, bytes.NewReader(payload))
-	if err != nil {
-		v.logger.WithError(err).Error("Failed to create validation request")
-		return fmt.Errorf("failed to create validation request: %w", err)
+	// Create a new fasthttp.Request for external validation
+	externalReq := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(externalReq)
+
+	externalReq.SetRequestURI(v.endpoint)
+	externalReq.Header.SetMethod(v.method)
+	externalReq.SetBody(payload)
+	externalReq.Header.Set("Content-Type", "application/json")
+
+	// Set headers from plugin configuration
+	for k, v := range v.headers {
+		externalReq.Header.Set(k, v)
 	}
 
-	// Set Content-Type header
-	req.Header.Set("Content-Type", "application/json")
-
-	// Set all headers from settings
-	for headerKey, headerValue := range v.headers {
-		req.Header.Set(headerKey, headerValue)
-		v.logger.WithFields(logrus.Fields{
-			"header": headerKey,
-			"value":  headerValue,
-		}).Debug("Setting header")
+	// Create a fasthttp.Client
+	client := &fasthttp.Client{
+		ReadTimeout:  v.timeout,
+		WriteTimeout: v.timeout,
 	}
 
-	v.logger.WithFields(logrus.Fields{
-		"url":     req.URL.String(),
-		"method":  req.Method,
-		"headers": req.Header,
-		"payload": string(payload),
-	}).Debug("Executing validation request")
+	// Send the request
+	externalResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(externalResp)
 
-	// Execute request
-	client := &http.Client{Timeout: v.timeout}
-	resp, err := client.Do(req)
-	if err != nil {
+	if err := client.Do(externalReq, externalResp); err != nil {
 		v.logger.WithError(err).Error("Failed to execute validation request")
 		return &types.PluginError{
-			StatusCode: http.StatusBadRequest,
+			StatusCode: fasthttp.StatusBadRequest,
 			Message:    "Validation request failed",
 		}
 	}
-	defer resp.Body.Close()
 
-	v.logger.WithFields(logrus.Fields{
-		"status_code": resp.StatusCode,
-	}).Debug("Received validation response")
-
-	// Parse response
+	// Process the response
+	respBody := externalResp.Body()
 	var result map[string]interface{}
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		v.logger.WithError(err).Error("Failed to read response body")
-		return &types.PluginError{
-			StatusCode: http.StatusBadRequest,
-			Message:    "Failed to read validation response",
-		}
-	}
-
-	v.logger.WithFields(logrus.Fields{
-		"response_body": string(respBody),
-		"conditions":    v.conditions,
-	}).Debug("Evaluating response with conditions")
-
 	if err := json.Unmarshal(respBody, &result); err != nil {
 		v.logger.WithError(err).Error("Failed to parse validation response")
 		return &types.PluginError{
-			StatusCode: http.StatusBadRequest,
+			StatusCode: fasthttp.StatusBadRequest,
 			Message:    "Invalid validation response format",
 		}
 	}
 
-	// Check conditions
+	// Evaluate conditions
 	for _, condition := range v.conditions {
 		v.logger.WithFields(logrus.Fields{
 			"condition": condition,
@@ -261,7 +238,7 @@ func (v *ExternalValidator) ProcessRequest(reqCtx *types.RequestContext, pluginC
 			matched := types.EvaluateCondition(condition, currentValue)
 			if matched && condition.StopFlow {
 				return &types.PluginError{
-					StatusCode: http.StatusOK,
+					StatusCode: fasthttp.StatusOK,
 					Message:    condition.Message,
 				}
 			}
@@ -271,7 +248,7 @@ func (v *ExternalValidator) ProcessRequest(reqCtx *types.RequestContext, pluginC
 	return nil
 }
 
-func (v *ExternalValidator) ProcessResponse(respCtx *types.ResponseContext, pluginCtx *types.PluginContext) error {
+func (v *ExternalValidator) ProcessResponse(respCtx *types.ResponseContext) error {
 	// Add any response processing logic here
 	return nil
 }

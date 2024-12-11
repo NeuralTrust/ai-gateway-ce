@@ -72,7 +72,7 @@ func (r *Registry) ExecutePlugins(ctx *types.RequestContext, configs []types.Plu
 
 		// If there's only one plugin at this priority, execute it sequentially
 		if len(plugins) == 1 {
-			if err := plugins[0].plugin.ProcessRequest(ctx, &types.PluginContext{}); err != nil {
+			if err := plugins[0].plugin.ProcessRequest(ctx, &types.ResponseContext{}); err != nil {
 				return err
 			}
 			continue
@@ -86,7 +86,7 @@ func (r *Registry) ExecutePlugins(ctx *types.RequestContext, configs []types.Plu
 			wg.Add(1)
 			go func(pe pluginExecution) {
 				defer wg.Done()
-				if err := pe.plugin.ProcessRequest(ctx, &types.PluginContext{}); err != nil {
+				if err := pe.plugin.ProcessRequest(ctx, &types.ResponseContext{}); err != nil {
 					errChan <- err
 				}
 			}(p)

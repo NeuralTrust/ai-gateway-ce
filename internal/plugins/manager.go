@@ -1,6 +1,7 @@
 package plugins
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
@@ -11,32 +12,38 @@ import (
 	"ai-gateway-ce/internal/types"
 )
 
+type pluginKey struct {
+	name   string
+	config string // JSON representation of config
+}
+
 type Manager struct {
-	logger     *logrus.Logger
-	redis      *redis.Client
-	pluginPool *sync.Pool
-	plugins    map[string]types.Plugin
-	factory    *Factory
-	mu         sync.RWMutex
+	logger  *logrus.Logger
+	redis   *redis.Client
+	plugins map[pluginKey]types.Plugin
+	factory *Factory
+	mu      sync.RWMutex
 }
 
 func NewManager(logger *logrus.Logger, redis *redis.Client) *Manager {
 	return &Manager{
-		logger: logger,
-		redis:  redis,
-		pluginPool: &sync.Pool{
-			New: func() interface{} {
-				return make(map[string]interface{})
-			},
-		},
-		plugins: make(map[string]types.Plugin),
+		logger:  logger,
+		redis:   redis,
+		plugins: make(map[pluginKey]types.Plugin),
 		factory: NewFactory(logger, redis),
 	}
 }
 
 func (m *Manager) getPlugin(name string, config types.PluginConfig) (types.Plugin, error) {
+	// Create a unique key for this plugin configuration
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal plugin config: %w", err)
+	}
+	key := pluginKey{name: name, config: string(configJSON)}
+
 	m.mu.RLock()
-	if plugin, exists := m.plugins[name]; exists {
+	if plugin, exists := m.plugins[key]; exists {
 		m.mu.RUnlock()
 		return plugin, nil
 	}
@@ -46,49 +53,53 @@ func (m *Manager) getPlugin(name string, config types.PluginConfig) (types.Plugi
 	defer m.mu.Unlock()
 
 	// Check again in case another goroutine created it
-	if plugin, exists := m.plugins[name]; exists {
+	if plugin, exists := m.plugins[key]; exists {
 		return plugin, nil
 	}
 
-	// Create new plugin using factory
+	// Create and configure new plugin
 	plugin, err := m.factory.CreatePlugin(name, config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create plugin %s: %w", name, err)
 	}
 
-	m.plugins[name] = plugin
+	if err := plugin.Configure(config); err != nil {
+		return nil, fmt.Errorf("failed to configure plugin %s: %w", name, err)
+	}
+
+	m.plugins[key] = plugin
 	return plugin, nil
 }
 
 func (m *Manager) executePlugin(plugin types.Plugin, config types.PluginConfig, reqCtx *types.RequestContext, respCtx *types.ResponseContext) error {
-	// Configure plugin if needed
-	if err := plugin.Configure(config); err != nil {
-		return fmt.Errorf("failed to configure plugin %s: %w", config.Name, err)
-	}
-
-	pluginCtx := &types.PluginContext{
-		Config:   config,
-		Redis:    m.redis,
-		Logger:   m.logger,
-		Metadata: make(map[string]interface{}),
-	}
-
-	if reqCtx != nil {
-		if err := plugin.ProcessRequest(reqCtx, pluginCtx); err != nil {
-			// Don't wrap PluginError to preserve status code
-			if pluginErr, ok := err.(*types.PluginError); ok {
-				return pluginErr
+	// Execute plugin based on its stage
+	switch config.Stage {
+	case "pre_request":
+		if reqCtx != nil {
+			if err := plugin.ProcessRequest(reqCtx, respCtx); err != nil {
+				if pluginErr, ok := err.(*types.PluginError); ok {
+					return pluginErr
+				}
+				return fmt.Errorf("plugin %s error: %w", config.Name, err)
 			}
-			return fmt.Errorf("plugin %s error: %w", config.Name, err)
 		}
-	}
-	if respCtx != nil {
-		if err := plugin.ProcessResponse(respCtx, pluginCtx); err != nil {
-			// Don't wrap PluginError to preserve status code
-			if pluginErr, ok := err.(*types.PluginError); ok {
-				return pluginErr
+	case "post_request":
+		if reqCtx != nil {
+			if err := plugin.ProcessRequest(reqCtx, respCtx); err != nil {
+				if pluginErr, ok := err.(*types.PluginError); ok {
+					return pluginErr
+				}
+				return fmt.Errorf("plugin %s error: %w", config.Name, err)
 			}
-			return fmt.Errorf("plugin %s error: %w", config.Name, err)
+		}
+	case "pre_response", "post_response":
+		if respCtx != nil && respCtx.Response != nil {
+			if err := plugin.ProcessResponse(respCtx); err != nil {
+				if pluginErr, ok := err.(*types.PluginError); ok {
+					return pluginErr
+				}
+				return fmt.Errorf("plugin %s error: %w", config.Name, err)
+			}
 		}
 	}
 	return nil
@@ -156,6 +167,12 @@ func (m *Manager) ExecutePlugins(pluginChain []types.PluginConfig, reqCtx *types
 						} else {
 							errChan <- fmt.Errorf("plugin %s error: %w", config.Name, err)
 						}
+					}
+					if respCtx.Metadata == nil {
+						respCtx.Metadata = make(map[string]interface{})
+					}
+					for k, v := range respCtx.Metadata {
+						respCtx.Metadata[k] = v
 					}
 				}(p)
 			}

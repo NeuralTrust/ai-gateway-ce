@@ -22,34 +22,22 @@ const (
 
 // RequestContext represents the context for processing requests
 type RequestContext struct {
-	GatewayID          string                 `json:"gateway_id"`
-	Path               string                 `json:"path"`
-	Method             string                 `json:"method"`
-	Headers            map[string]string      `json:"headers"`
-	Body               []byte                 `json:"body"`
-	Context            context.Context        `json:"context"`
-	Request            *fasthttp.Request      `json:"request"`
-	Response           *fasthttp.Response     `json:"response"`
-	Modified           bool                   `json:"modified"`
-	Metadata           map[string]interface{} `json:"metadata"`
-	ValidationResponse []byte                 `json:"validation_response"`
-	OriginalRequest    *fasthttp.Request      `json:"original_request"`
-	ForwardRequest     *fasthttp.Request      `json:"forward_request"`
-	StopForwarding     bool                   `json:"stop_forwarding"`
+	Context   context.Context
+	GatewayID string
+	Headers   map[string]string
+	Method    string
+	Path      string
+	Request   *fasthttp.Request
+	Body      []byte
 }
 
 // ResponseContext represents the context for processing responses
 type ResponseContext struct {
-	GatewayID        string                 `json:"gateway_id"`
-	Headers          map[string]string      `json:"headers"`
-	Body             []byte                 `json:"body"`
-	Context          context.Context        `json:"context"`
-	Request          *fasthttp.Request      `json:"request"`
-	Response         *fasthttp.Response     `json:"response"`
-	Modified         bool                   `json:"modified"`
-	Metadata         map[string]interface{} `json:"metadata"`
-	OriginalRequest  *fasthttp.Request      `json:"original_request"`
-	OriginalResponse *fasthttp.Response     `json:"original_response"`
+	Context   context.Context
+	GatewayID string
+	Headers   map[string]string
+	Response  *fasthttp.Response
+	Metadata  map[string]interface{}
 }
 
 // PluginError represents a plugin execution error
@@ -272,15 +260,4 @@ type PluginContext struct {
 	Redis    *redis.Client
 	Logger   *logrus.Logger
 	Metadata map[string]interface{}
-}
-
-// Plugin interface defines the methods that all plugins must implement
-type Plugin interface {
-	Name() string
-	Priority() int
-	Stage() ExecutionStage
-	Parallel() bool
-	ProcessRequest(reqCtx *RequestContext, pluginCtx *PluginContext) error
-	ProcessResponse(respCtx *ResponseContext, pluginCtx *PluginContext) error
-	Configure(config PluginConfig) error
 }

@@ -2,349 +2,294 @@ package database
 
 import (
 	"context"
-	"database/sql"
-	"errors"
+	"encoding/json"
 	"fmt"
+	"time"
 
-	"github.com/google/uuid"
+	"ai-gateway-ce/internal/cache"
+	"ai-gateway-ce/internal/models"
+
+	"github.com/sirupsen/logrus"
+	"gorm.io/gorm"
 )
 
+// Repository handles all database operations
 type Repository struct {
-	db *DB
+	db     *gorm.DB
+	logger logrus.FieldLogger
+	cache  *cache.Cache
 }
 
-func NewRepository(db *DB) *Repository {
-	return &Repository{db: db}
+func NewRepository(db *gorm.DB, logger logrus.FieldLogger, cache *cache.Cache) *Repository {
+	return &Repository{
+		db:     db,
+		logger: logger,
+		cache:  cache,
+	}
+}
+
+// IsValidAPIKey checks if the provided API key is valid for the given gateway
+func (r *Repository) IsValidAPIKey(gatewayID, apiKey string) bool {
+	var count int64
+
+	// Check in database first
+	result := r.db.Model(&models.APIKey{}).
+		Where("gateway_id = ? AND key = ? AND active = true AND (expires_at IS NULL OR expires_at > NOW())",
+			gatewayID, apiKey).
+		Count(&count)
+
+	if result.Error != nil {
+		r.logger.Error(context.Background(), "Failed to check API key validity", "error", result.Error)
+		return false
+	}
+
+	// If key is valid, cache it
+	if count > 0 {
+		cacheKey := fmt.Sprintf("apikey:%s:%s", gatewayID, apiKey)
+		value, err := json.Marshal(true)
+		if err != nil {
+			r.logger.Warn(context.Background(), "Failed to marshal cache value", "error", err)
+		} else {
+			if err := r.cache.Set(context.Background(), cacheKey, string(value), 5*time.Minute); err != nil {
+				r.logger.Warn(context.Background(), "Failed to cache valid API key", "error", err)
+			}
+		}
+	}
+
+	return count > 0
+}
+
+// IsValidAPIKeyFast checks cache first, then database
+func (r *Repository) IsValidAPIKeyFast(gatewayID, apiKey string) bool {
+	cacheKey := fmt.Sprintf("apikey:%s:%s", gatewayID, apiKey)
+
+	// Try cache first
+	value, err := r.cache.Get(context.Background(), cacheKey)
+	if err == nil {
+		var isValid bool
+		if err := json.Unmarshal([]byte(value), &isValid); err == nil && isValid {
+			return true
+		}
+	}
+
+	// If not in cache or invalid, check database
+	return r.IsValidAPIKey(gatewayID, apiKey)
 }
 
 // Gateway operations
-func (r *Repository) CreateGateway(ctx context.Context, gateway *Gateway) error {
-	query := `
-		INSERT INTO gateways (
-			id, name, subdomain, api_key, status, tier, 
-			created_at, updated_at, enabled_plugins, required_plugins
-		) VALUES (
-			:id, :name, :subdomain, :api_key, :status, :tier,
-			:created_at, :updated_at, :enabled_plugins, :required_plugins
-		)`
-
-	_, err := r.db.NamedExecContext(ctx, query, gateway)
-	return err
+func (r *Repository) CreateGateway(ctx context.Context, gateway *models.Gateway) error {
+	if gateway.RequiredPlugins == nil {
+		gateway.RequiredPlugins = models.EmptyJSONMap()
+	}
+	return r.db.Create(gateway).Error
 }
 
-func (r *Repository) GetGateway(ctx context.Context, id string) (*Gateway, error) {
-	// Add validation before querying database
-	if id == "" || id == "null" {
-		return nil, fmt.Errorf("invalid gateway ID: cannot be empty or null")
-	}
-
-	if _, err := uuid.Parse(id); err != nil {
-		return nil, fmt.Errorf("invalid gateway ID format: %v", err)
-	}
-
-	var gateway Gateway
-	err := r.db.GetContext(ctx, &gateway, "SELECT * FROM gateways WHERE id = $1", id)
+func (r *Repository) GetGateway(ctx context.Context, id string) (*models.Gateway, error) {
+	var gateway models.Gateway
+	err := r.db.Model(&models.Gateway{}).Where("id = ?", id).Take(&gateway).Error
 	if err != nil {
 		return nil, err
 	}
+
+	if gateway.RequiredPlugins == nil {
+		gateway.RequiredPlugins = models.EmptyJSONMap()
+	}
+
 	return &gateway, nil
 }
 
-func (r *Repository) GetGatewayBySubdomain(ctx context.Context, subdomain string) (*Gateway, error) {
-	query := `
-		SELECT id, name, subdomain, api_key, status, tier, enabled_plugins, required_plugins,
-			   created_at, updated_at
-		FROM gateways
-		WHERE subdomain = $1
-	`
-
-	var gateway Gateway
-	err := r.db.GetContext(ctx, &gateway, query, subdomain)
+func (r *Repository) GetGatewayBySubdomain(ctx context.Context, subdomain string) (*models.Gateway, error) {
+	var gateway models.Gateway
+	err := r.db.Model(&models.Gateway{}).Where("subdomain = ?", subdomain).Take(&gateway).Error
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
+		return nil, err
+	}
+
+	if gateway.RequiredPlugins == nil {
+		gateway.RequiredPlugins = models.EmptyJSONMap()
+	}
+
+	return &gateway, nil
+}
+
+func (r *Repository) ListGateways(ctx context.Context, offset, limit int) ([]models.Gateway, error) {
+	var gateways []models.Gateway
+	err := r.db.Model(&models.Gateway{}).
+		Order("created_at desc").
+		Limit(limit).
+		Offset(offset).
+		Find(&gateways).Error
+
+	for i := range gateways {
+		if gateways[i].RequiredPlugins == nil {
+			gateways[i].RequiredPlugins = models.EmptyJSONMap()
 		}
-		return nil, err
 	}
 
-	return &gateway, nil
-}
-
-func (r *Repository) ListGateways(ctx context.Context, offset, limit int) ([]Gateway, error) {
-	var gateways []Gateway
-	err := r.db.SelectContext(ctx, &gateways, "SELECT * FROM gateways ORDER BY created_at DESC LIMIT $1 OFFSET $2", limit, offset)
 	return gateways, err
 }
 
-func (r *Repository) UpdateGateway(ctx context.Context, gateway *Gateway) error {
-	query := `
-		UPDATE gateways SET 
-			name = :name,
-			status = :status,
-			tier = :tier,
-			updated_at = :updated_at,
-			enabled_plugins = :enabled_plugins,
-			required_plugins = :required_plugins
-		WHERE id = :id`
-
-	result, err := r.db.NamedExecContext(ctx, query, gateway)
-	if err != nil {
-		return err
+func (r *Repository) UpdateGateway(ctx context.Context, gateway *models.Gateway) error {
+	result := r.db.Save(gateway)
+	if result.Error != nil {
+		return result.Error
 	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return errors.New("gateway not found")
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("gateway not found")
 	}
 	return nil
 }
 
 func (r *Repository) DeleteGateway(ctx context.Context, id string) error {
-	result, err := r.db.ExecContext(ctx, "DELETE FROM gateways WHERE id = $1", id)
-	if err != nil {
-		return err
+	result := r.db.Delete(&models.Gateway{}, "id = ?", id)
+	if result.Error != nil {
+		return result.Error
 	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return errors.New("gateway not found")
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("gateway not found")
 	}
 	return nil
 }
 
 // Forwarding Rule operations
-func (r *Repository) CreateRule(ctx context.Context, rule *ForwardingRule) error {
-	query := `
-		INSERT INTO forwarding_rules (
-			id, gateway_id, path, target, methods, headers, strip_path, preserve_host,
-			retry_attempts, plugin_chain, active, public, created_at, updated_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
-		)
-	`
-
-	// Convert plugin chain to proper JSON array
-	var pluginChain []byte
-	if len(rule.PluginChain) > 0 {
-		pluginChain = []byte(rule.PluginChain)
-	} else {
-		pluginChain = []byte("[]")
-	}
-
-	_, err := r.db.ExecContext(ctx, query,
-		rule.ID,
-		rule.GatewayID,
-		rule.Path,
-		rule.Target,
-		rule.Methods,
-		rule.Headers,
-		rule.StripPath,
-		rule.PreserveHost,
-		rule.RetryAttempts,
-		pluginChain,
-		rule.Active,
-		rule.Public,
-		rule.CreatedAt,
-		rule.UpdatedAt,
-	)
-
-	return err
+func (r *Repository) CreateRule(ctx context.Context, rule *models.ForwardingRule) error {
+	return r.db.Create(rule).Error
 }
 
-func (r *Repository) GetRule(ctx context.Context, id string, gatewayID string) (*ForwardingRule, error) {
-	query := `
-		SELECT id, gateway_id, path, target, methods, headers, strip_path, preserve_host,
-			   retry_attempts, plugin_chain, active, public, created_at, updated_at
-		FROM forwarding_rules
-		WHERE id = $1 AND gateway_id = $2
-	`
-
-	var rule ForwardingRule
-	err := r.db.GetContext(ctx, &rule, query, id, gatewayID)
+func (r *Repository) GetRule(ctx context.Context, id string, gatewayID string) (*models.ForwardingRule, error) {
+	var rule models.ForwardingRule
+	err := r.db.Where("id = ? AND gateway_id = ?", id, gatewayID).First(&rule).Error
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
-		}
 		return nil, err
 	}
-
 	return &rule, nil
 }
 
-func (r *Repository) ListRules(ctx context.Context, gatewayID string) ([]ForwardingRule, error) {
-	query := `
-		SELECT id, gateway_id, path, target, methods, headers, strip_path, preserve_host,
-			   retry_attempts, plugin_chain, active, public, created_at, updated_at
-		FROM forwarding_rules
-		WHERE gateway_id = $1
-		ORDER BY created_at DESC
-	`
-
-	var rules []ForwardingRule
-	err := r.db.SelectContext(ctx, &rules, query, gatewayID)
-	if err != nil {
-		return nil, err
-	}
-
-	return rules, nil
+func (r *Repository) ListRules(ctx context.Context, gatewayID string) ([]models.ForwardingRule, error) {
+	var rules []models.ForwardingRule
+	err := r.db.Where("gateway_id = ?", gatewayID).Find(&rules).Error
+	return rules, err
 }
 
-func (r *Repository) UpdateRule(ctx context.Context, rule *ForwardingRule) error {
-	query := `
-		UPDATE forwarding_rules
-		SET path = $1, target = $2, methods = $3, headers = $4, strip_path = $5,
-			preserve_host = $6, retry_attempts = $7, plugin_chain = $8, active = $9,
-			public = $10, updated_at = $11
-		WHERE id = $12 AND gateway_id = $13
-	`
-
-	// Convert plugin chain to proper JSON array
-	var pluginChain []byte
-	if len(rule.PluginChain) > 0 {
-		pluginChain = []byte(rule.PluginChain)
-	} else {
-		pluginChain = []byte("[]")
+func (r *Repository) UpdateRule(ctx context.Context, rule *models.ForwardingRule) error {
+	result := r.db.Save(rule)
+	if result.Error != nil {
+		return result.Error
 	}
-
-	result, err := r.db.ExecContext(ctx, query,
-		rule.Path,
-		rule.Target,
-		rule.Methods,
-		rule.Headers,
-		rule.StripPath,
-		rule.PreserveHost,
-		rule.RetryAttempts,
-		pluginChain,
-		rule.Active,
-		rule.Public,
-		rule.UpdatedAt,
-		rule.ID,
-		rule.GatewayID,
-	)
-	if err != nil {
-		return err
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("rule not found")
 	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-
 	return nil
 }
 
-func (r *Repository) DeleteRule(ctx context.Context, id string, gatewayID string) error {
-	query := `DELETE FROM forwarding_rules WHERE id = $1 AND gateway_id = $2`
-
-	result, err := r.db.ExecContext(ctx, query, id, gatewayID)
-	if err != nil {
-		return err
+func (r *Repository) DeleteRule(ctx context.Context, id, gatewayID string) error {
+	result := r.db.Where("id = ? AND gateway_id = ?", id, gatewayID).Delete(&models.ForwardingRule{})
+	if result.Error != nil {
+		return result.Error
 	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("rule not found")
 	}
-
-	if rows == 0 {
-		return sql.ErrNoRows
-	}
-
 	return nil
 }
 
 // API Key operations
-func (r *Repository) CreateAPIKey(ctx context.Context, apiKey *APIKey) error {
-	query := `
-		INSERT INTO api_keys (
-			id, name, key, gateway_id, created_at,
-			expires_at, last_used_at, status
-		) VALUES (
-			:id, :name, :key, :gateway_id, :created_at,
-			:expires_at, :last_used_at, :status
-		)`
+func (r *Repository) CreateAPIKey(ctx context.Context, apiKey *models.APIKey) error {
+	if apiKey.GatewayID == "" {
+		return fmt.Errorf("gateway_id is required")
+	}
+	if apiKey.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if apiKey.Key == "" {
+		return fmt.Errorf("key is required")
+	}
 
-	_, err := r.db.NamedExecContext(ctx, query, apiKey)
-	return err
+	now := time.Now()
+	if apiKey.CreatedAt.IsZero() {
+		apiKey.CreatedAt = now
+	}
+	if apiKey.UpdatedAt.IsZero() {
+		apiKey.UpdatedAt = now
+	}
+
+	if !apiKey.Active {
+		apiKey.Active = true
+	}
+
+	result := r.db.Create(apiKey)
+	if result.Error != nil {
+		return fmt.Errorf("failed to create API key: %w", result.Error)
+	}
+
+	return nil
 }
 
-func (r *Repository) GetAPIKey(ctx context.Context, id string) (*APIKey, error) {
-	var apiKey APIKey
-	err := r.db.GetContext(ctx, &apiKey, "SELECT * FROM api_keys WHERE id = $1", id)
+func (r *Repository) GetAPIKey(ctx context.Context, id string) (*models.APIKey, error) {
+	var apiKey models.APIKey
+	err := r.db.Where("id = ?", id).First(&apiKey).Error
 	if err != nil {
 		return nil, err
 	}
 	return &apiKey, nil
 }
 
-func (r *Repository) ListAPIKeys(ctx context.Context, gatewayID string) ([]APIKey, error) {
-	var apiKeys []APIKey
-	err := r.db.SelectContext(ctx, &apiKeys, "SELECT * FROM api_keys WHERE gateway_id = $1", gatewayID)
+func (r *Repository) ListAPIKeys(ctx context.Context, gatewayID string) ([]models.APIKey, error) {
+	var apiKeys []models.APIKey
+	err := r.db.Where("gateway_id = ?", gatewayID).Find(&apiKeys).Error
 	return apiKeys, err
 }
 
-func (r *Repository) UpdateAPIKey(ctx context.Context, apiKey *APIKey) error {
-	query := `
-		UPDATE api_keys SET 
-			name = :name,
-			status = :status,
-			expires_at = :expires_at,
-			last_used_at = :last_used_at
-		WHERE id = :id AND gateway_id = :gateway_id`
-
-	result, err := r.db.NamedExecContext(ctx, query, apiKey)
-	if err != nil {
-		return err
+func (r *Repository) UpdateAPIKey(ctx context.Context, apiKey *models.APIKey) error {
+	result := r.db.Save(apiKey)
+	if result.Error != nil {
+		return result.Error
 	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return errors.New("api key not found")
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("api key not found")
 	}
 	return nil
 }
 
 func (r *Repository) DeleteAPIKey(ctx context.Context, id, gatewayID string) error {
-	result, err := r.db.ExecContext(ctx, "DELETE FROM api_keys WHERE id = $1 AND gateway_id = $2", id, gatewayID)
-	if err != nil {
-		return err
+	result := r.db.Where("id = ? AND gateway_id = ?", id, gatewayID).Delete(&models.APIKey{})
+	if result.Error != nil {
+		return result.Error
 	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return errors.New("api key not found")
+	if result.RowsAffected == 0 {
+		return fmt.Errorf("api key not found")
 	}
 	return nil
 }
 
 func (r *Repository) SubdomainExists(ctx context.Context, subdomain string) (bool, error) {
-	query := `
-		SELECT EXISTS (
-			SELECT 1
-			FROM gateways
-			WHERE subdomain = $1
-		)`
-
-	var exists bool
-	err := r.db.GetContext(ctx, &exists, query, subdomain)
+	var count int64
+	err := r.db.Model(&models.Gateway{}).Where("subdomain = ?", subdomain).Count(&count).Error
 	if err != nil {
 		return false, err
 	}
-	return exists, nil
+	return count > 0, nil
+}
+
+func (r *Repository) IsSubdomainAvailable(subdomain string) (bool, error) {
+	var count int64
+	err := r.db.Model(&models.Gateway{}).Where("subdomain = ?", subdomain).Count(&count).Error
+	if err != nil {
+		return false, fmt.Errorf("failed to check subdomain: %w", err)
+	}
+	return count == 0, nil
+}
+
+func (r *Repository) ValidateAPIKey(ctx context.Context, gatewayID string, apiKey string) (bool, error) {
+	var exists int64
+	err := r.db.Model(&models.APIKey{}).
+		Where("gateway_id = ? AND key = ? AND (expires_at IS NULL OR expires_at > ?)",
+			gatewayID, apiKey, time.Now()).
+		Count(&exists).Error
+
+	if err != nil {
+		return false, err
+	}
+
+	return exists > 0, nil
 }

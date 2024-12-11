@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Specify version: ce or ee
+VERSION=${1:-ce}
+
 # Colors for output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -27,15 +30,29 @@ wait_for_server() {
     echo -e "${GREEN}$name is ready!${NC}"
 }
 
-# Start Admin server in background
-echo -e "${GREEN}Starting Admin server...${NC}"
-go run cmd/gateway/main.go admin > logs/admin.log 2>&1 &
-ADMIN_PID=$!
+# Start servers based on version
+if [ "$VERSION" = "ce" ]; then
+    # Start CE servers
+    echo -e "${GREEN}Starting CE Admin server...${NC}"
+    LOG_LEVEL=debug go run cmd/gateway/main.go admin > logs/admin.log 2>&1 &
+    ADMIN_PID=$!
 
-# Start Proxy server in background
-echo -e "${GREEN}Starting Proxy server...${NC}"
-go run cmd/gateway/main.go proxy > logs/proxy.log 2>&1 &
-PROXY_PID=$!
+    echo -e "${GREEN}Starting CE Proxy server...${NC}"
+    LOG_LEVEL=debug go run cmd/gateway/main.go proxy > logs/proxy.log 2>&1 &
+    PROXY_PID=$!
+elif [ "$VERSION" = "ee" ]; then
+    # Start EE servers
+    echo -e "${GREEN}Starting EE Admin server...${NC}"
+    LOG_LEVEL=debug ../ai-gateway-ee/bin/ai-gateway-ee --type admin --config config.yaml > logs/admin.log 2>&1 &
+    ADMIN_PID=$!
+
+    echo -e "${GREEN}Starting EE Proxy server...${NC}"
+    LOG_LEVEL=debug ../ai-gateway-ee/bin/ai-gateway-ee --type proxy --config config.yaml > logs/proxy.log 2>&1 &
+    PROXY_PID=$!
+else
+    echo -e "${RED}Unknown version: $VERSION${NC}"
+    exit 1
+fi
 
 # Wait for both servers to be ready
 wait_for_server 8080 "Admin server"

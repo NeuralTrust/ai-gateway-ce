@@ -23,3 +23,13 @@ func ParseFieldMaps(settings map[string]interface{}) []FieldMapping {
 	}
 	return fieldMaps
 }
+
+type Plugin interface {
+	Name() string
+	Priority() int
+	Stage() ExecutionStage
+	Parallel() bool
+	ProcessRequest(reqCtx *RequestContext, respCtx *ResponseContext) error
+	ProcessResponse(respCtx *ResponseContext) error
+	Configure(config PluginConfig) error
+}

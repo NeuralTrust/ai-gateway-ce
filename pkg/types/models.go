@@ -14,6 +14,17 @@ type Gateway struct {
 	APIKey    string                  `json:"api_key"`
 }
 
+// Rule defines a forwarding rule configuration
+type Rule struct {
+	ID             string                  `json:"id"`
+	Path           string                  `json:"path"`
+	Target         string                  `json:"target"`
+	Methods        []string                `json:"methods"`
+	StripPath      bool                    `json:"strip_path"`
+	RequiredGroups []string                `json:"required_groups"`
+	Plugins        map[string]PluginConfig `json:"plugins"`
+}
+
 type ConsumerGroup struct {
 	ID       string                 `json:"id"`
 	Name     string                 `json:"name"`

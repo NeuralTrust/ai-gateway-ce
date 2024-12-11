@@ -6,14 +6,12 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
-	"github.com/valyala/fasthttp"
 )
 
 type RateLimitTypes struct {
@@ -69,121 +67,183 @@ func (r *RateLimiter) GetName() string {
 	return r.Name()
 }
 
-func (r *RateLimiter) ProcessRequest(ctx *types.RequestContext, pluginCtx *types.PluginContext) error {
-	return r.processRequest(ctx, pluginCtx)
+func (r *RateLimiter) ProcessRequest(ctx *types.RequestContext, respCtx *types.ResponseContext) error {
+	// Build rate limit keys
+	keys := r.buildRateLimitKeys(ctx)
+
+	// Check global rate limit first
+	if r.limitTypes.Global && keys["global"] != "" {
+		config, exists := r.limits["global"]
+		if exists {
+			count, err := r.checkRateLimit(context.Background(), keys["global"], config.Window)
+			if err != nil {
+				return err
+			}
+
+			r.logger.WithFields(logrus.Fields{
+				"type":   "global",
+				"count":  count,
+				"limit":  config.Limit,
+				"window": config.Window,
+			}).Debug("Checking global rate limit")
+
+			if count > int64(config.Limit) {
+				r.addRateLimitHeaders(ctx, config)
+				if respCtx.Metadata == nil {
+					respCtx.Metadata = make(map[string]interface{})
+				}
+				respCtx.Metadata["rate_limit_exceeded"] = true
+				respCtx.Metadata["rate_limit_type"] = "global"
+				respCtx.Metadata["retry_after"] = r.actions.RetryAfter
+				return &types.PluginError{
+					StatusCode: http.StatusTooManyRequests,
+					Message:    "Global rate limit exceeded",
+				}
+			}
+			r.addRateLimitHeaders(ctx, config)
+		}
+	}
+
+	// Check IP-based rate limit
+	if r.limitTypes.PerIP && keys["per_ip"] != "" {
+		config, exists := r.limits["per_ip"]
+		if exists {
+			count, err := r.checkRateLimit(context.Background(), keys["per_ip"], config.Window)
+			if err != nil {
+				return err
+			}
+
+			r.logger.WithFields(logrus.Fields{
+				"type":   "per_ip",
+				"count":  count,
+				"limit":  config.Limit,
+				"window": config.Window,
+			}).Debug("Checking per-IP rate limit")
+
+			if count > int64(config.Limit) {
+				r.addRateLimitHeaders(ctx, config)
+				respCtx.Metadata["rate_limit_exceeded"] = true
+				respCtx.Metadata["rate_limit_type"] = "IP"
+				return &types.PluginError{
+					StatusCode: http.StatusTooManyRequests,
+					Message:    "IP rate limit exceeded",
+				}
+			}
+			r.addRateLimitHeaders(ctx, config)
+		}
+	}
+
+	// Check user-based rate limit
+	if r.limitTypes.PerUser && keys["per_user"] != "" {
+		config, exists := r.limits["per_user"]
+		if exists {
+			count, err := r.checkRateLimit(context.Background(), keys["per_user"], config.Window)
+			if err != nil {
+				return err
+			}
+
+			r.logger.WithFields(logrus.Fields{
+				"type":   "per_user",
+				"count":  count,
+				"limit":  config.Limit,
+				"window": config.Window,
+			}).Debug("Checking per-user rate limit")
+
+			if count > int64(config.Limit) {
+				r.addRateLimitHeaders(ctx, config)
+				respCtx.Metadata["rate_limit_exceeded"] = true
+				respCtx.Metadata["rate_limit_type"] = "user"
+				return &types.PluginError{
+					StatusCode: http.StatusTooManyRequests,
+					Message:    "User rate limit exceeded",
+				}
+			}
+			r.addRateLimitHeaders(ctx, config)
+		}
+	}
+
+	return nil
 }
 
-func (r *RateLimiter) ProcessResponse(ctx *types.ResponseContext, pluginCtx *types.PluginContext) error {
-	return r.processResponse(ctx, pluginCtx)
+func (r *RateLimiter) ProcessResponse(resp *types.ResponseContext) error {
+	return r.processResponse(resp)
 }
 
 func (r *RateLimiter) checkRateLimit(ctx context.Context, key string, window time.Duration) (int64, error) {
-	pipe := r.redis.Pipeline()
 	now := time.Now().Unix()
 	windowStart := now - int64(window.Seconds())
+
+	// Use Redis MULTI to make this atomic
+	pipe := r.redis.Pipeline()
 
 	// Clean up old entries
 	pipe.ZRemRangeByScore(ctx, key, "0", strconv.FormatInt(windowStart, 10))
 
-	// Add current request
+	// Add the current request with a unique score to prevent collisions
 	requestID := fmt.Sprintf("%d:%s", now, uuid.New().String())
 	pipe.ZAdd(ctx, key, &redis.Z{
 		Score:  float64(now),
 		Member: requestID,
 	})
 
+	// Get the count after adding the current request
+	countCmd := pipe.ZCount(ctx, key, strconv.FormatInt(windowStart, 10), strconv.FormatInt(now, 10))
+
 	// Set expiration
 	pipe.Expire(ctx, key, window)
 
-	// Get current count
-	count := pipe.ZCard(ctx, key)
-
-	// Execute pipeline
+	// Execute all commands atomically
 	_, err := pipe.Exec(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to check rate limit: %w", err)
+		return 0, fmt.Errorf("failed to execute rate limit pipeline: %w", err)
+	}
+
+	count, err := countCmd.Result()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get request count: %w", err)
 	}
 
 	r.logger.WithFields(logrus.Fields{
-		"key":    key,
-		"count":  count.Val(),
-		"window": window,
+		"key":          key,
+		"currentCount": count,
+		"window":       window,
+		"windowStart":  windowStart,
+		"now":          now,
 	}).Debug("Rate limit check")
 
-	return count.Val(), nil
+	return count, nil
 }
 
-func (r *RateLimiter) buildRateLimitKeys(reqCtx *types.RequestContext) map[string]string {
+func (r *RateLimiter) buildRateLimitKeys(ctx *types.RequestContext) map[string]string {
 	keys := make(map[string]string)
-	base := fmt.Sprintf("ratelimit:%s:%s", reqCtx.GatewayID, reqCtx.Path)
+	base := fmt.Sprintf("ratelimit:%s:%s", ctx.GatewayID, ctx.Path)
 
-	// Per-User limit (most specific)
-	if r.limitTypes.PerUser {
-		if userID := reqCtx.Headers["X-User-ID"]; userID != "" {
-			keys["per_user"] = fmt.Sprintf("%s:type:user:id:%s", base, userID)
-		}
-	}
-
-	// Per-IP limit
-	if r.limitTypes.PerIP {
-		if ip := r.getClientIP(reqCtx.Request); ip != "" {
-			keys["per_ip"] = fmt.Sprintf("%s:type:ip:addr:%s", base, ip)
-		}
-	}
-
-	// Global limit (least specific)
+	// Global key
 	if r.limitTypes.Global {
 		keys["global"] = fmt.Sprintf("%s:type:global", base)
 	}
 
+	// IP key
+	if r.limitTypes.PerIP {
+		if ip := ctx.Headers["X-Forwarded-For"]; ip != "" {
+			keys["per_ip"] = fmt.Sprintf("%s:type:ip:addr:%s", base, ip)
+		}
+	}
+
+	// User key
+	if r.limitTypes.PerUser {
+		if userID := ctx.Headers["X-User-ID"]; userID != "" {
+			keys["per_user"] = fmt.Sprintf("%s:type:user:id:%s", base, userID)
+		}
+	}
+
 	r.logger.WithFields(logrus.Fields{
-		"gatewayID": reqCtx.GatewayID,
-		"path":      reqCtx.Path,
+		"gatewayID": ctx.GatewayID,
+		"path":      ctx.Path,
 		"keys":      keys,
 	}).Debug("Built rate limit keys")
 
 	return keys
-}
-
-func (r *RateLimiter) cleanupKeys(ctx context.Context, reqCtx *types.RequestContext) {
-	keys := r.buildRateLimitKeys(reqCtx)
-	for _, key := range keys {
-		if err := r.redis.Del(ctx, key).Err(); err != nil {
-			r.logger.WithError(err).WithField("key", key).Warn("Failed to cleanup rate limit key")
-		}
-	}
-}
-
-func (r *RateLimiter) handleRateLimitExceeded(reqCtx *types.RequestContext, err error) error {
-	// Set content type to JSON
-	reqCtx.Headers["Content-Type"] = "application/json"
-
-	// Add retry-after header if configured
-	if r.actions != nil && r.actions.RetryAfter != "" {
-		reqCtx.Headers["Retry-After"] = r.actions.RetryAfter
-	}
-
-	switch r.actions.Type {
-	case "block":
-		return &types.PluginError{
-			StatusCode: http.StatusTooManyRequests,
-			Message:    fmt.Sprintf("Rate limit exceeded: %s", err.Error()),
-		}
-	case "degrade":
-		if r.actions.FallbackService != "" {
-			reqCtx.Headers["X-Original-Host"] = string(reqCtx.Request.URI().Host())
-			reqCtx.Request.SetHost(r.actions.FallbackService)
-			return nil
-		}
-	case "notify":
-		r.notifyRateLimitExceeded(reqCtx, err)
-		return nil
-	}
-
-	return &types.PluginError{
-		StatusCode: http.StatusTooManyRequests,
-		Message:    fmt.Sprintf("Rate limit exceeded: %s", err.Error()),
-	}
 }
 
 func (r *RateLimiter) addRateLimitHeaders(reqCtx *types.RequestContext, limitConfig RateLimitConfig) {
@@ -203,36 +263,6 @@ func (r *RateLimiter) updateDynamicLimits(respCtx *types.ResponseContext) {
 		// Implement dynamic rate limiting logic here
 		// For example, reduce limits temporarily when backend is struggling
 	}
-}
-
-func (r *RateLimiter) getClientIP(req *fasthttp.Request) string {
-	// Try X-Forwarded-For header
-	if xff := string(req.Header.Peek("X-Forwarded-For")); xff != "" {
-		ips := strings.Split(xff, ",")
-		if len(ips) > 0 {
-			return strings.TrimSpace(ips[0])
-		}
-	}
-
-	// Try X-Real-IP header
-	if xrip := string(req.Header.Peek("X-Real-IP")); xrip != "" {
-		return xrip
-	}
-
-	// Fall back to remote address
-	return string(req.Header.Peek("X-Real-IP"))
-}
-
-func (r *RateLimiter) notifyRateLimitExceeded(reqCtx *types.RequestContext, err error) {
-	notification := map[string]interface{}{
-		"tenant_id": reqCtx.GatewayID,
-		"path":      reqCtx.Path,
-		"error":     err.Error(),
-		"timestamp": time.Now(),
-	}
-
-	// Implement notification logic here (e.g., send to monitoring system)
-	r.logger.WithFields(logrus.Fields(notification)).Warn("Rate limit exceeded")
 }
 
 func (r *RateLimiter) Configure(config types.PluginConfig) error {
@@ -356,71 +386,9 @@ func (r *RateLimiter) Configure(config types.PluginConfig) error {
 	return nil
 }
 
-func (r *RateLimiter) processRequest(ctx *types.RequestContext, pluginCtx *types.PluginContext) error {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	r.logger.WithFields(logrus.Fields{
-		"gatewayID": ctx.GatewayID,
-		"path":      ctx.Path,
-		"method":    ctx.Method,
-		"headers":   ctx.Headers,
-	}).Debug("Processing request")
-
-	// Build rate limit keys
-	keys := r.buildRateLimitKeys(ctx)
-
-	// Check per-user limit first (most specific)
-	if userKey, ok := keys["per_user"]; ok {
-		if config, exists := r.limits["per_user"]; exists {
-			count, err := r.checkRateLimit(ctx.Context, userKey, config.Window)
-			if err != nil {
-				return err
-			}
-			if count > int64(config.Limit) {
-				return r.handleRateLimitExceeded(ctx, fmt.Errorf("user rate limit exceeded"))
-			}
-			// Add rate limit headers
-			r.addRateLimitHeaders(ctx, config)
-		}
-	}
-
-	// Then check per-IP limit
-	if ipKey, ok := keys["per_ip"]; ok {
-		if config, exists := r.limits["per_ip"]; exists {
-			count, err := r.checkRateLimit(ctx.Context, ipKey, config.Window)
-			if err != nil {
-				return err
-			}
-			if count > int64(config.Limit) {
-				return r.handleRateLimitExceeded(ctx, fmt.Errorf("IP rate limit exceeded"))
-			}
-			// Add rate limit headers
-			r.addRateLimitHeaders(ctx, config)
-		}
-	}
-
-	// Finally check global limit (least specific)
-	if globalKey, ok := keys["global"]; ok {
-		if config, exists := r.limits["global"]; exists {
-			count, err := r.checkRateLimit(ctx.Context, globalKey, config.Window)
-			if err != nil {
-				return err
-			}
-			if count > int64(config.Limit) {
-				return r.handleRateLimitExceeded(ctx, fmt.Errorf("global rate limit exceeded"))
-			}
-			// Add rate limit headers
-			r.addRateLimitHeaders(ctx, config)
-		}
-	}
-
-	return nil
-}
-
-func (r *RateLimiter) processResponse(ctx *types.ResponseContext, pluginCtx *types.PluginContext) error {
+func (r *RateLimiter) processResponse(resp *types.ResponseContext) error {
 	// Update dynamic limits based on response status
-	r.updateDynamicLimits(ctx)
+	r.updateDynamicLimits(resp)
 	return nil
 }
 
