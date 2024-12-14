@@ -1,7 +1,7 @@
 package cache
 
 import (
-	"ai-gateway-ce/internal/models"
+	"ai-gateway-ce/pkg/models"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,7 +12,7 @@ import (
 
 func (c *Cache) GetAPIKeys(gatewayID string) ([]models.APIKey, error) {
 	key := fmt.Sprintf("apikeys:%s", gatewayID)
-	data, err := c.client.Get(context.Background(), key).Result()
+	data, err := c.Client().Get(context.Background(), key).Result()
 	if err != nil {
 		if err == redis.Nil {
 			return []models.APIKey{}, nil
@@ -76,5 +76,5 @@ func (c *Cache) SaveAPIKey(ctx context.Context, key *models.APIKey) error {
 	}
 
 	cacheKey := fmt.Sprintf("apikeys:%s", key.GatewayID)
-	return c.client.Set(ctx, cacheKey, string(data), 0).Err()
+	return c.Client().Set(ctx, cacheKey, string(data), 0).Err()
 }

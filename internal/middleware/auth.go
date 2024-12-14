@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"strings"
 
-	"ai-gateway-ce/internal/database"
+	"ai-gateway-ce/pkg/database"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"

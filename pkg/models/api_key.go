@@ -15,3 +15,7 @@ type APIKey struct {
 	CreatedAt time.Time  `json:"created_at" gorm:"column:created_at"`
 	UpdatedAt time.Time  `json:"updated_at" gorm:"column:updated_at"`
 }
+
+func (APIKey) TableName() string {
+	return "api_keys"
+}

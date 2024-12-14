@@ -20,7 +20,7 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "External Validator Company",
-    "subdomain": "ext-validator-29",
+    "subdomain": "ext-validator-59",
     "tier": "basic",
     "enabled_plugins": ["external_validator"]
   }')
@@ -61,9 +61,9 @@ echo -e "API Key: $API_KEY"
 
 # 2. Create forwarding rule with external validator
 echo -e "${GREEN}2. Creating forwarding rule...${NC}"
-
-# Prepare the request body
-RULE_REQUEST='{
+curl -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
+  -H "Content-Type: application/json" \
+  -d '{
     "path": "/test",
     "target": "https://httpbin.org/anything",
     "methods": ["POST"],
@@ -102,12 +102,6 @@ RULE_REQUEST='{
     ]
 }'
 
-# Make the request and save verbose output to stderr
-curl -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
-  -H "Authorization: Bearer $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d "$RULE_REQUEST"
-
 # Add a small delay to ensure rule propagation
 sleep 2
 
@@ -125,8 +119,7 @@ response=$(curl -s -w "\n%{http_code}" \
 
 http_code=$(echo "$response" | tail -n1)
 body=$(echo "$response" | head -n 1)
-
-if [ "$http_code" == "200" ]; then
+if [ "$http_code" == "422" ]; then
     if echo "$body" | grep -q "Request was flagged as malicious"; then
         echo -e "${GREEN}Flagged prompt test: Success (got validation message)${NC}"
     else

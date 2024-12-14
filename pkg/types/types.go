@@ -1,45 +1,163 @@
 package types
 
-import "context"
+import (
+	"strings"
+	"time"
 
-// ExecutionStage defines when a plugin should be executed
-type ExecutionStage int
-
-const (
-	PreRequest ExecutionStage = iota
-	PostRequest
+	"github.com/go-redis/redis/v8"
+	"github.com/sirupsen/logrus"
 )
 
-// Plugin interface defines the methods that all plugins must implement
-type Plugin interface {
-	Name() string
-	Priority() int
-	Stage() ExecutionStage
-	Parallel() bool
-	ProcessRequest(ctx *RequestContext, pluginCtx *PluginContext) error
-	ProcessResponse(ctx *ResponseContext, pluginCtx *PluginContext) error
+// Request/Response types for API
+type CreateGatewayRequest struct {
+	Name            string                  `json:"name" binding:"required"`
+	Subdomain       string                  `json:"subdomain" binding:"required"`
+	Tier            string                  `json:"tier" binding:"required"`
+	EnabledPlugins  []string                `json:"enabled_plugins"`
+	RequiredPlugins map[string]PluginConfig `json:"required_plugins"`
 }
 
-// BasePlugin provides common functionality for all plugins
-type BasePlugin struct{}
-
-// RequestContext holds the context for processing requests
-type RequestContext struct {
-	context.Context
-	Headers map[string]string
-	Body    []byte
+type UpdateGatewayRequest struct {
+	Name            *string                 `json:"name,omitempty"`
+	Status          *string                 `json:"status,omitempty"`
+	Tier            *string                 `json:"tier,omitempty"`
+	EnabledPlugins  []string                `json:"enabled_plugins,omitempty"`
+	RequiredPlugins map[string]PluginConfig `json:"required_plugins,omitempty"`
 }
 
-// ResponseContext holds the context for processing responses
-type ResponseContext struct {
-	context.Context
-	Headers    map[string]string
-	Body       []byte
-	StatusCode int
-	Metadata   map[string]interface{}
+type CreateAPIKeyRequest struct {
+	Name      string     `json:"name" binding:"required"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
 }
 
-// PluginContext holds shared context between plugins
+type CreateRuleRequest struct {
+	Path          string            `json:"path" binding:"required"`
+	Target        string            `json:"target" binding:"required"`
+	Methods       []string          `json:"methods"`
+	Headers       map[string]string `json:"headers"`
+	StripPath     *bool             `json:"strip_path"`
+	PreserveHost  *bool             `json:"preserve_host"`
+	RetryAttempts *int              `json:"retry_attempts"`
+	PluginChain   []PluginConfig    `json:"plugin_chain"`
+}
+
+type UpdateRuleRequest struct {
+	Path          string            `json:"path"`
+	Target        string            `json:"target"`
+	Methods       []string          `json:"methods"`
+	Headers       map[string]string `json:"headers"`
+	StripPath     *bool             `json:"strip_path"`
+	PreserveHost  *bool             `json:"preserve_host"`
+	RetryAttempts *int              `json:"retry_attempts"`
+	Active        *bool             `json:"active"`
+	PluginChain   []PluginConfig    `json:"plugin_chain"`
+}
+
+// EvaluateCondition evaluates a response condition against a value
+func EvaluateCondition(condition ResponseCondition, value interface{}) bool {
+	switch condition.Operator {
+	case "eq":
+		return value == condition.Value
+	case "ne":
+		return value != condition.Value
+	case "gt":
+		return compareNumbers(value, condition.Value) > 0
+	case "gte":
+		return compareNumbers(value, condition.Value) >= 0
+	case "lt":
+		return compareNumbers(value, condition.Value) < 0
+	case "lte":
+		return compareNumbers(value, condition.Value) <= 0
+	case "contains":
+		return containsValue(value, condition.Value)
+	case "not_contains":
+		return !containsValue(value, condition.Value)
+	case "exists":
+		return value != nil
+	case "not_exists":
+		return value == nil
+	default:
+		return false
+	}
+}
+
+// Helper functions for condition evaluation
+func compareNumbers(a, b interface{}) int {
+	var aFloat, bFloat float64
+
+	switch v := a.(type) {
+	case int:
+		aFloat = float64(v)
+	case int32:
+		aFloat = float64(v)
+	case int64:
+		aFloat = float64(v)
+	case float32:
+		aFloat = float64(v)
+	case float64:
+		aFloat = v
+	default:
+		return 0
+	}
+
+	switch v := b.(type) {
+	case int:
+		bFloat = float64(v)
+	case int32:
+		bFloat = float64(v)
+	case int64:
+		bFloat = float64(v)
+	case float32:
+		bFloat = float64(v)
+	case float64:
+		bFloat = v
+	default:
+		return 0
+	}
+
+	if aFloat < bFloat {
+		return -1
+	}
+	if aFloat > bFloat {
+		return 1
+	}
+	return 0
+}
+
+func containsValue(value, searchValue interface{}) bool {
+	switch v := value.(type) {
+	case string:
+		searchStr, ok := searchValue.(string)
+		if !ok {
+			return false
+		}
+		return strings.Contains(v, searchStr)
+	case []interface{}:
+		for _, item := range v {
+			if item == searchValue {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for _, item := range v {
+			if item == searchValue {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Add PluginContext type
 type PluginContext struct {
-	Data map[string]interface{}
+	Config   PluginConfig
+	Redis    *redis.Client
+	Logger   *logrus.Logger
+	Metadata map[string]interface{}
+}
+
+// GatewayData combines gateway and its rules for caching
+type GatewayData struct {
+	Gateway *Gateway
+	Rules   []ForwardingRule
 }

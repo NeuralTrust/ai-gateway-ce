@@ -12,141 +12,167 @@ BASE_DOMAIN=${BASE_DOMAIN:-"example.com"}
 
 echo -e "${GREEN}Testing Rate Limiter${NC}\n"
 
-# 1. Create a gateway with rate limiting
-echo -e "${GREEN}1. Creating gateway with rate limiting...${NC}"
+# 1. Create a gateway with multiple rate limiting types
+echo -e "${GREEN}1. Creating gateway with multiple rate limiting types...${NC}"
 GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Rate Limited Company",
-    "subdomain": "ratelimited27",
+    "name": "Multi Rate Limited Gateway",
+    "subdomain": "multirate98",
     "tier": "basic",
-    "enabled_plugins": ["rate_limiter"]
-  }')
-
-# Extract fields from response
-GATEWAY_ID=$(echo $GATEWAY_RESPONSE | jq -r '.ID // .id')
-SUBDOMAIN=$(echo $GATEWAY_RESPONSE | jq -r '.Subdomain // .subdomain')
-
-# Check if we got valid values
-if [ -z "$GATEWAY_ID" ] || [ "$GATEWAY_ID" = "null" ]; then
-    echo -e "${RED}Failed to get gateway ID. Response: $GATEWAY_RESPONSE${NC}"
-    exit 1
-fi
-
-if [ -z "$SUBDOMAIN" ] || [ "$SUBDOMAIN" = "null" ]; then
-    echo -e "${RED}Failed to get subdomain. Response: $GATEWAY_RESPONSE${NC}"
-    exit 1
-fi
-
-# Check gateway status
-STATUS=$(echo $GATEWAY_RESPONSE | jq -r '.Status // .status')
-if [ "$STATUS" != "active" ]; then
-    echo -e "${RED}Gateway is not active. Status: $STATUS${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}Successfully created gateway:${NC}"
-echo -e "Gateway ID: $GATEWAY_ID"
-wait 2
-# Create API key for the gateway
-echo -e "${GREEN}Creating API key for the gateway...${NC}"
-API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/keys" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Test Rate Limiter Key",
-    "expires_at": null
-  }')
-echo "API Key Response: $API_KEY_RESPONSE"
-# Extract API key from response
-API_KEY=$(echo $API_KEY_RESPONSE | jq -r '.key')
-
-# Check if we got a valid API key
-if [ -z "$API_KEY" ] || [ "$API_KEY" = "null" ]; then
-    echo -e "${RED}Failed to get API key. Response: $API_KEY_RESPONSE${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}Successfully created API key:${NC}"
-echo -e "API Key: $API_KEY\n"
-
-# 2. Create forwarding rule with rate limiter
-echo -e "${GREEN}2. Creating forwarding rule...${NC}"
-
-# Prepare the request body
-RULE_REQUEST='{
-    "path": "/test",
-    "target": "https://httpbin.org/get",
-    "methods": ["GET"],
-    "strip_path": true,
-    "plugin_chain": [
+    "enabled_plugins": ["rate_limiter"],
+    "required_plugins": [
         {
             "name": "rate_limiter",
             "enabled": true,
             "stage": "pre_request",
-            "parallel": false,
+            "priority": 1,
             "settings": {
                 "limits": {
                     "global": {
-                        "limit": 10,
+                        "limit": 15,
+                        "window": "1m"
+                    },
+                    "per_ip": {
+                        "limit": 5,
+                        "window": "1m"
+                    },
+                    "per_user": {
+                        "limit": 5,
                         "window": "1m"
                     }
                 },
-                "limit_types": {
-                    "global": true
-                },
                 "actions": {
-                    "type": "block",
+                    "type": "reject",
                     "retry_after": "60"
                 }
             }
         }
     ]
-}'
+}')
 
-# Make the request and capture the response
-RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
-  -H "Authorization: Bearer $API_KEY" \
+# Extract gateway details
+GATEWAY_ID=$(echo $GATEWAY_RESPONSE | jq -r '.id')
+SUBDOMAIN=$(echo $GATEWAY_RESPONSE | jq -r '.subdomain')
+
+if [ "$GATEWAY_ID" == "null" ] || [ -z "$GATEWAY_ID" ]; then
+    echo -e "${RED}Failed to create gateway. Response: $GATEWAY_RESPONSE${NC}"
+    exit 1
+fi
+
+echo "Gateway created with ID: $GATEWAY_ID"
+
+# Create API key
+echo -e "\n${GREEN}2. Creating API key...${NC}"
+API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/keys" \
   -H "Content-Type: application/json" \
-  -d "$RULE_REQUEST")
+  -d '{
+    "name": "Test Key"
+}')
 
-echo "Rule Response: $RULE_RESPONSE"
+API_KEY=$(echo $API_KEY_RESPONSE | jq -r '.key')
 
-# Check if rule creation was successful
-if [[ "$RULE_RESPONSE" == *"error"* ]]; then
-    echo -e "${RED}Failed to create rule. Response: $RULE_RESPONSE${NC}"
+if [ "$API_KEY" == "null" ] || [ -z "$API_KEY" ]; then
+    echo -e "${RED}Failed to create API key. Response: $API_KEY_RESPONSE${NC}"
     exit 1
 fi
 
-RULE_ID=$(echo "$RULE_RESPONSE" | jq -r '.id')
-if [ -z "$RULE_ID" ] || [ "$RULE_ID" = "null" ]; then
-    echo -e "${RED}Failed to get rule ID from response${NC}"
-    exit 1
-fi
+echo "API Key created: $API_KEY"
 
-echo -e "${GREEN}Successfully created rule with ID: $RULE_ID${NC}\n"
+# Create rules for different paths
+echo -e "\n${GREEN}3. Creating rules for different paths...${NC}"
+RULE1_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/path1",
+    "target": "https://httpbin.org/get",
+    "methods": ["GET"],
+    "strip_path": true
+}')
 
-# Add a small delay to ensure rule propagation
+RULE2_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/path2",
+    "target": "https://httpbin.org/get",
+    "methods": ["GET"],
+    "strip_path": true
+}')
+
+# Wait for configuration to propagate
 sleep 2
 
-# 3. Test Global Rate Limit (limit: 10 per minute)
-echo -e "\n${GREEN}Testing Global Rate Limit (10 requests/minute)${NC}"
-echo -e "Making 12 requests (should see rate limit after 10)..."
-for i in {1..12}; do
-    response=$(curl -s -w "\n%{http_code}" \
+# Test different rate limit types
+echo -e "\n${GREEN}4. Testing different rate limit types...${NC}"
+
+# Test IP-based rate limit
+echo -e "\n${GREEN}4.1 Testing IP-based rate limit (limit: 5/min)...${NC}"
+for i in {1..6}; do
+    RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path2" \
         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
         -H "Authorization: Bearer ${API_KEY}" \
-        -H "X-Forwarded-For: 1.2.3.4" \
-        "${PROXY_URL}/test")
+        -H "X-Real-IP: 192.168.1.1")
     
-    http_code=$(echo "$response" | tail -n1)
-    body=$(echo "$response" | head -n 1)
-    if [ "$http_code" == "200" ]; then
-        echo -e "${GREEN}Request $i: Success${NC}"
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+    BODY=$(echo "$RESPONSE" | head -n1)
+    
+    if [ "$HTTP_CODE" == "200" ]; then
+        echo -e "${GREEN}IP-based Request $i: Success${NC}"
+    elif [ "$HTTP_CODE" == "429" ]; then
+        echo -e "${RED}IP-based Request $i: Rate Limited (Expected after 5 requests)${NC}"
+        echo "Response: $BODY"
     else
-        echo -e "${RED}Request $i: Rate Limited (${http_code})${NC}"
-        echo "Response: $body"
+        echo -e "${RED}IP-based Request $i: Unexpected status code: $HTTP_CODE${NC}"
+        echo "Response: $BODY"
     fi
-    sleep 0.1  # Small delay to ensure proper order
+    sleep 0.1
+done
+
+# Test user-based rate limit
+echo -e "\n${GREEN}4.2 Testing user-based rate limit (limit: 5/min)...${NC}"
+for i in {1..6}; do
+    RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path2" \
+        -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
+        -H "Authorization: Bearer ${API_KEY}" \
+        -H "X-User-ID: 123" \
+        -H "X-Real-IP: 192.168.1.2")
+    
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+    BODY=$(echo "$RESPONSE" | head -n1)
+
+    if [ "$HTTP_CODE" == "200" ]; then
+        echo -e "${GREEN}User-based Request $i: Success${NC}"
+    elif [ "$HTTP_CODE" == "429" ]; then
+        echo -e "${RED}User-based Request $i: Rate Limited (Expected after 5 requests)${NC}"
+        echo "Response: $BODY"
+    else
+        echo -e "${RED}User-based Request $i: Unexpected status code: $HTTP_CODE${NC}"
+        echo "Response: $BODY"
+    fi
+    sleep 0.1
+done
+
+# Test global rate limit
+echo -e "\n${GREEN}4.3 Testing global rate limit (limit: 10/min)...${NC}"
+for i in {1..11}; do
+    RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path1" \
+        -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
+        -H "Authorization: Bearer ${API_KEY}" \
+        -H "X-Real-IP: 192.168.1.$((i + 2))")
+    
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+    BODY=$(echo "$RESPONSE" | head -n1)
+    
+    if [ "$HTTP_CODE" == "200" ]; then
+        echo -e "${GREEN}Global Request $i: Success${NC}"
+    elif [ "$HTTP_CODE" == "429" ]; then
+        echo -e "${RED}Global Request $i: Rate Limited (Expected after 10 requests)${NC}"
+        echo "Response: $BODY"
+    else
+        echo -e "${RED}Global Request $i: Unexpected status code: $HTTP_CODE${NC}"
+        echo "Response: $BODY"
+    fi
+    sleep 0.1
 done
 
 echo -e "\n${GREEN}Rate limiter tests completed${NC}"

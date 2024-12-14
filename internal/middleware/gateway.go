@@ -1,7 +1,7 @@
 package middleware
 
 import (
-	"ai-gateway-ce/internal/cache"
+	"ai-gateway-ce/pkg/cache"
 	"fmt"
 	"strings"
 

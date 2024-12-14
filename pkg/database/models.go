@@ -5,40 +5,9 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
-	"time"
 
-	"ai-gateway-ce/internal/types"
+	"ai-gateway-ce/pkg/types"
 )
-
-type Gateway struct {
-	ID              string      `gorm:"column:id;primaryKey"`
-	Name            string      `gorm:"column:name"`
-	Subdomain       string      `gorm:"column:subdomain"`
-	ApiKey          string      `gorm:"column:api_key"`
-	Status          string      `gorm:"column:status"`
-	Tier            string      `gorm:"column:tier"`
-	CreatedAt       time.Time   `gorm:"column:created_at"`
-	UpdatedAt       time.Time   `gorm:"column:updated_at"`
-	EnabledPlugins  StringArray `gorm:"column:enabled_plugins;type:json"`
-	RequiredPlugins JSONMap     `gorm:"column:required_plugins;type:json"`
-}
-
-type ForwardingRule struct {
-	ID            string      `gorm:"column:id;primaryKey"`
-	GatewayID     string      `gorm:"column:gateway_id"`
-	Path          string      `gorm:"column:path"`
-	Target        string      `gorm:"column:target"`
-	Methods       StringArray `gorm:"column:methods;type:json"`
-	Headers       JSONMap     `gorm:"column:headers;type:json"`
-	StripPath     bool        `gorm:"column:strip_path"`
-	PreserveHost  bool        `gorm:"column:preserve_host"`
-	RetryAttempts int         `gorm:"column:retry_attempts"`
-	PluginChain   JSONArray   `gorm:"column:plugin_chain;type:json"`
-	Active        bool        `gorm:"column:active"`
-	Public        bool        `gorm:"column:public"`
-	CreatedAt     time.Time   `gorm:"column:created_at"`
-	UpdatedAt     time.Time   `gorm:"column:updated_at"`
-}
 
 // Custom types for database serialization
 type StringArray []string

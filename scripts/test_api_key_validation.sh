@@ -18,7 +18,7 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "API Key Test Gateway",
-    "subdomain": "apikey-test-26",
+    "subdomain": "apikey-test-28",
     "tier": "basic"
   }')
 

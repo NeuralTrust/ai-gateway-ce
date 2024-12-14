@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -18,10 +17,11 @@ import (
 	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 
-	"ai-gateway-ce/internal/cache"
-	"ai-gateway-ce/internal/database"
-	"ai-gateway-ce/internal/models"
-	"ai-gateway-ce/internal/types"
+	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/common"
+	"ai-gateway-ce/pkg/database"
+	"ai-gateway-ce/pkg/models"
+	"ai-gateway-ce/pkg/types"
 )
 
 var validate = validator.New()
@@ -66,14 +66,6 @@ func convertHeadersToMap(headers []string) map[string]string {
 	return result
 }
 
-func convertHeadersToSlice(headers map[string]string) []string {
-	var result []string
-	for k, v := range headers {
-		result = append(result, fmt.Sprintf("%s:%s", k, v))
-	}
-	return result
-}
-
 type AdminServer struct {
 	*BaseServer
 }
@@ -91,7 +83,7 @@ func (s *AdminServer) setupRoutes() {
 		// Gateway routes
 		gateways := v1.Group("/gateways")
 		{
-			gateways.POST("", s.createGateway)
+			gateways.POST("", s.CreateGateway)
 			gateways.GET("", s.listGateways)
 			gateways.GET("/:gateway_id", s.getGatewayHandler)
 			gateways.PUT("/:gateway_id", s.updateGateway)
@@ -129,81 +121,97 @@ func (s *AdminServer) Run() error {
 }
 
 // Gateway Management
-func (s *AdminServer) createGateway(c *gin.Context) {
-	var req types.CreateGatewayRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		s.logger.WithError(err).Error("Failed to bind request")
+func (s *AdminServer) CreateGateway(c *gin.Context) {
+	var gateway models.Gateway
+	if err := c.ShouldBindJSON(&gateway); err != nil {
+		s.logger.WithError(err).Error("Failed to bind JSON")
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-
-	// Validate subdomain format
-	if err := validate.Var(req.Subdomain, "subdomain"); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid subdomain format"})
-		return
-	}
-
-	// Check if subdomain is available
-	available, err := s.repo.IsSubdomainAvailable(req.Subdomain)
+	exists, err := s.repo.SubdomainExists(c.Request.Context(), gateway.Subdomain)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to check subdomain availability")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check subdomain availability"})
 		return
 	}
-	if !available {
-		c.JSON(http.StatusConflict, gin.H{"error": "Subdomain already taken"})
-		return
-	}
-
-	// Convert types.Gateway to database.Gateway
-	dbGateway := &models.Gateway{
-		ID:             uuid.New().String(),
-		Name:           req.Name,
-		Subdomain:      req.Subdomain,
-		Status:         "active",
-		Tier:           req.Tier,
-		EnabledPlugins: req.EnabledPlugins,
-		CreatedAt:      time.Now(),
-		UpdatedAt:      time.Now(),
-	}
-
-	if err := s.repo.CreateGateway(c.Request.Context(), dbGateway); err != nil {
-		s.logger.WithError(err).Error("Failed to create gateway")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create gateway"})
+	if exists {
+		s.logger.WithField("subdomain", gateway.Subdomain).Error("Subdomain already exists")
+		c.JSON(http.StatusConflict, gin.H{"error": "Subdomain already exists"})
 		return
 	}
 
-	// Store gateway in cache
-	gatewayKey := fmt.Sprintf("gateway:%s", dbGateway.ID)
-	gatewayJSON, err := json.Marshal(dbGateway)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to marshal gateway")
-		// Continue anyway as gateway is in DB
-	} else {
-		if err := s.cache.Set(c, gatewayKey, string(gatewayJSON), 0); err != nil {
-			s.logger.WithError(err).Error("Failed to cache gateway")
-			// Continue anyway as gateway is in DB
+	// Validate required plugins
+	for _, plugin := range gateway.RequiredPlugins {
+		if err := s.validatePluginConfig(plugin); err != nil {
+			s.logger.WithError(err).WithField("plugin", plugin.Name).Error("Invalid plugin configuration")
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
+			return
 		}
 	}
 
-	// Store subdomain mapping
-	subdomainKey := fmt.Sprintf("subdomain:%s", dbGateway.Subdomain)
-	if err := s.cache.Set(c, subdomainKey, dbGateway.ID, 0); err != nil {
+	s.logger.WithFields(logrus.Fields{
+		"gateway":          gateway,
+		"enabled_plugins":  gateway.EnabledPlugins,
+		"required_plugins": gateway.RequiredPlugins,
+	}).Info("Creating gateway - received request")
+
+	// Initialize RequiredPlugins as slice if nil
+	if gateway.RequiredPlugins == nil {
+		s.logger.Debug("Initializing empty RequiredPlugins slice")
+		gateway.RequiredPlugins = make([]types.PluginConfig, 0)
+	}
+
+	// Validate that all required plugins are also enabled
+	for _, plugin := range gateway.RequiredPlugins {
+		found := false
+		for _, enabled := range gateway.EnabledPlugins {
+			if enabled == plugin.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			s.logger.WithFields(logrus.Fields{
+				"plugin":          plugin.Name,
+				"enabled_plugins": gateway.EnabledPlugins,
+			}).Error("Plugin required but not enabled")
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": fmt.Sprintf("Plugin %s is required but not enabled. Required plugins must be in the enabled plugins list.", plugin.Name),
+			})
+			return
+		}
+	}
+
+	// Set default status if not provided
+	if gateway.Status == "" {
+		gateway.Status = "active"
+	}
+
+	// Create gateway
+	if err := s.repo.CreateGateway(c.Request.Context(), &gateway); err != nil {
+		s.logger.WithError(err).Error("Failed to create gateway")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"gateway_id":       gateway.ID,
+		"required_plugins": gateway.RequiredPlugins,
+	}).Info("Gateway created successfully")
+
+	// Cache the gateway data
+	if err := s.updateGatewayCache(c.Request.Context(), &gateway); err != nil {
+		s.logger.WithError(err).Error("Failed to cache gateway")
+	}
+
+	// Cache the subdomain mapping
+	subdomainKey := fmt.Sprintf("subdomain:%s", gateway.Subdomain)
+	if err := s.cache.Set(c.Request.Context(), subdomainKey, gateway.ID, 0); err != nil {
 		s.logger.WithError(err).Error("Failed to cache subdomain mapping")
-		// Don't return error here, as gateway is already created
-		// Just log the error and continue
 	}
 
-	// Initialize empty rules in cache
-	rulesKey := fmt.Sprintf("rules:%s", dbGateway.ID)
-	if err := s.cache.Set(c, rulesKey, "[]", 0); err != nil {
-		s.logger.WithError(err).Error("Failed to initialize rules cache")
-		// Don't return error here, as gateway is already created
-		// Just log the error and continue
-	}
-
-	// Convert back to API type
-	apiGateway, err := s.convertDBGatewayToAPI(dbGateway)
+	// Convert to API response
+	apiGateway, err := s.convertDBGatewayToAPI(&gateway)
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to convert gateway")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process gateway"})
@@ -329,8 +337,6 @@ func (s *AdminServer) getGatewayHandler(c *gin.Context) {
 		}
 	}
 
-	// Don't expose API key
-	gateway.ApiKey = ""
 	c.JSON(http.StatusOK, gateway)
 }
 
@@ -351,16 +357,6 @@ func (s *AdminServer) getGatewayFromCache(c *gin.Context, id string) (*types.Gat
 	}
 
 	return &gateway, nil
-}
-
-func (s *AdminServer) cacheGateway(c *gin.Context, gateway *types.Gateway) error {
-	key := fmt.Sprintf("gateway:%s", gateway.ID)
-	gatewayJSON, err := json.Marshal(gateway)
-	if err != nil {
-		return err
-	}
-
-	return s.cache.Set(c, key, string(gatewayJSON), 0)
 }
 
 func (s *AdminServer) updateGateway(c *gin.Context) {
@@ -399,17 +395,15 @@ func (s *AdminServer) updateGateway(c *gin.Context) {
 		dbGateway.EnabledPlugins = pq.StringArray(req.EnabledPlugins)
 	}
 	if req.RequiredPlugins != nil {
-		existingPlugins := make(map[string]interface{})
-		if dbGateway.RequiredPlugins != nil {
-			existingPlugins = dbGateway.RequiredPlugins
+		// Initialize plugins map
+		if dbGateway.RequiredPlugins == nil {
+			dbGateway.RequiredPlugins = []types.PluginConfig{}
 		}
 
-		// Merge with new plugins
-		for k, v := range req.RequiredPlugins {
-			existingPlugins[k] = v
+		// Convert and validate plugins
+		for _, config := range req.RequiredPlugins {
+			dbGateway.RequiredPlugins = append(dbGateway.RequiredPlugins, config)
 		}
-
-		dbGateway.RequiredPlugins = models.JSONMap(existingPlugins)
 	}
 
 	dbGateway.UpdatedAt = time.Now()
@@ -420,10 +414,11 @@ func (s *AdminServer) updateGateway(c *gin.Context) {
 		return
 	}
 
-	requiredPlugins, err := dbGateway.RequiredPlugins.ToPluginConfigMap()
+	// Convert to response type
+	apiGateway, err := s.convertDBGatewayToAPI(dbGateway)
 	if err != nil {
-		s.logger.WithError(err).Error("Failed to convert required plugins")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process gateway configuration"})
+		s.logger.WithError(err).Error("Failed to convert gateway")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process gateway"})
 		return
 	}
 
@@ -431,18 +426,20 @@ func (s *AdminServer) updateGateway(c *gin.Context) {
 		ID:              dbGateway.ID,
 		Name:            dbGateway.Name,
 		Subdomain:       dbGateway.Subdomain,
-		ApiKey:          dbGateway.ApiKey,
 		Status:          dbGateway.Status,
 		Tier:            dbGateway.Tier,
 		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
-		EnabledPlugins:  []string(dbGateway.EnabledPlugins),
-		RequiredPlugins: requiredPlugins,
+		EnabledPlugins:  dbGateway.EnabledPlugins,
+		RequiredPlugins: apiGateway.RequiredPlugins,
 	}
 
 	if err := s.updateGatewayCache(c.Request.Context(), dbGateway); err != nil {
 		s.logger.WithError(err).Error("Failed to update gateway cache")
 	}
+
+	// Invalidate caches
+	s.invalidateCaches(dbGateway.ID)
 
 	c.JSON(http.StatusOK, response)
 }
@@ -493,17 +490,6 @@ func (s *AdminServer) deleteGateway(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Gateway deleted successfully"})
-}
-
-// Helper methods
-func (s *AdminServer) saveGateway(c *gin.Context, gateway *types.Gateway) error {
-	key := fmt.Sprintf("gateway:%s", gateway.ID)
-	gatewayJSON, err := json.Marshal(gateway)
-	if err != nil {
-		return err
-	}
-
-	return s.cache.Set(c, key, string(gatewayJSON), 0)
 }
 
 // API Key Management
@@ -590,358 +576,6 @@ func (s *AdminServer) getAPIKeyHandler(c *gin.Context) {
 	// Don't expose the actual key
 	apiKey.Key = ""
 	c.JSON(http.StatusOK, apiKey)
-}
-
-func (s *AdminServer) revokeAPIKey(c *gin.Context) {
-	gatewayID := c.Param("gateway_id")
-	keyID := c.Param("key_id")
-
-	// Delete from database
-	if err := s.repo.DeleteAPIKey(c, keyID, gatewayID); err != nil {
-		s.logger.WithError(err).Error("Failed to revoke API key")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke API key"})
-		return
-	}
-
-	// Delete from cache
-	key := fmt.Sprintf("apikey:%s:%s", gatewayID, keyID)
-	if err := s.cache.Delete(c, key); err != nil {
-		s.logger.WithError(err).Error("Failed to remove API key from cache")
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "API key revoked successfully"})
-}
-
-// Forwarding Rule Management
-func (s *AdminServer) createForwardingRule(c *gin.Context) {
-	gatewayID := c.Param("gateway_id")
-
-	s.logger.WithFields(logrus.Fields{
-		"gateway_id": gatewayID,
-		"method":     c.Request.Method,
-		"path":       c.Request.URL.Path,
-	}).Info("Creating forwarding rule")
-
-	// Verify gateway exists and is active
-	dbGateway, err := s.repo.GetGateway(c, gatewayID)
-	if err != nil {
-		s.logger.WithError(err).WithField("gateway_id", gatewayID).Error("Failed to get gateway")
-		c.JSON(http.StatusNotFound, gin.H{"error": fmt.Sprintf("Gateway not found: %v", err)})
-		return
-	}
-
-	if dbGateway.Status != "active" {
-		s.logger.WithFields(logrus.Fields{
-			"gateway_id": gatewayID,
-			"status":     dbGateway.Status,
-		}).Error("Gateway is not active")
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Gateway is not active"})
-		return
-	}
-
-	// Verify API key matches gateway
-	apiKey := c.GetHeader("Authorization")
-	if !strings.HasPrefix(apiKey, "Bearer ") {
-		s.logger.WithFields(logrus.Fields{
-			"gateway_id": gatewayID,
-		}).Error("Missing or invalid Authorization header")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Missing or invalid Authorization header"})
-		return
-	}
-	apiKey = strings.TrimPrefix(apiKey, "Bearer ")
-
-	if apiKey != dbGateway.ApiKey {
-		s.logger.WithFields(logrus.Fields{
-			"gateway_id": gatewayID,
-		}).Error("Invalid API key")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid API key"})
-		return
-	}
-
-	var req types.CreateRuleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		s.logger.WithError(err).Error("Failed to bind request")
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	s.logger.WithFields(logrus.Fields{
-		"request": req,
-	}).Info("Received rule creation request")
-
-	// Convert methods to string array
-	var methods []string
-	if len(req.Methods) > 0 {
-		methods = req.Methods
-	} else {
-		methods = []string{"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"}
-	}
-
-	// Convert plugin chain to JSON array
-	pluginChainJSON, err := json.Marshal(req.PluginChain)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to marshal plugin chain")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin configuration"})
-		return
-	}
-
-	var dbPluginChain database.JSONArray
-	if err := dbPluginChain.Scan(pluginChainJSON); err != nil {
-		s.logger.WithError(err).Error("Failed to scan plugin chain")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin configuration"})
-		return
-	}
-
-	rule := &models.ForwardingRule{
-		ID:            uuid.New().String(),
-		GatewayID:     gatewayID,
-		Path:          req.Path,
-		Target:        req.Target,
-		Methods:       pq.StringArray(methods),
-		Headers:       pq.StringArray(convertMapToHeaders(req.Headers)),
-		StripPath:     req.StripPath != nil && *req.StripPath,
-		PreserveHost:  req.PreserveHost != nil && *req.PreserveHost,
-		RetryAttempts: defaultIfNil(req.RetryAttempts, 0),
-		PluginChain:   models.JSONMap{},
-		Active:        true,
-		Public:        false,
-		CreatedAt:     time.Now(),
-		UpdatedAt:     time.Now(),
-	}
-
-	s.logger.WithFields(logrus.Fields{
-		"rule": rule,
-	}).Info("Created rule object")
-
-	// Store in database
-	if err := s.repo.CreateRule(c, rule); err != nil {
-		s.logger.WithError(err).Error("Failed to create rule")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create rule"})
-		return
-	}
-
-	s.logger.Info("Successfully stored rule in database")
-
-	// Update rules cache
-	if err := s.updateRulesCache(c.Request.Context(), gatewayID); err != nil {
-		s.logger.WithError(err).Error("Failed to update rules cache")
-	}
-
-	s.logger.Info("Successfully updated rules cache")
-
-	// Convert plugin chain back to array for response
-	var pluginChain []types.PluginConfig
-	if err := json.Unmarshal(pluginChainJSON, &pluginChain); err != nil {
-		s.logger.WithError(err).Error("Failed to unmarshal plugin chain for response")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin configuration"})
-		return
-	}
-
-	response := s.getRuleResponse(rule)
-	c.JSON(http.StatusCreated, response)
-}
-
-func (s *AdminServer) listForwardingRules(c *gin.Context) {
-	gatewayID := c.Param("gateway_id")
-
-	// Get rules from database
-	dbRules, err := s.repo.ListRules(c, gatewayID)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to list rules")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list rules"})
-		return
-	}
-
-	// Convert to API response type
-	var rules []types.ForwardingRule
-	for _, dbRule := range dbRules {
-		rules = append(rules, s.getRuleResponse(&dbRule))
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"rules": rules,
-		"count": len(rules),
-	})
-}
-
-func (s *AdminServer) updateForwardingRule(c *gin.Context) {
-	gatewayID := c.Param("gateway_id")
-	ruleID := c.Param("rule_id")
-
-	// Get existing rule
-	dbRule, err := s.repo.GetRule(c, ruleID, gatewayID)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to get rule")
-		c.JSON(http.StatusNotFound, gin.H{"error": "Rule not found"})
-		return
-	}
-
-	var req types.UpdateRuleRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Update fields if provided
-	if req.Path != "" {
-		dbRule.Path = req.Path
-	}
-	if req.Target != "" {
-		dbRule.Target = req.Target
-	}
-	if len(req.Methods) > 0 {
-		dbRule.Methods = pq.StringArray(req.Methods)
-	}
-	if req.Headers != nil {
-		dbRule.Headers = pq.StringArray(convertMapToHeaders(req.Headers))
-	}
-	if req.StripPath != nil {
-		dbRule.StripPath = *req.StripPath
-	}
-	if req.PreserveHost != nil {
-		dbRule.PreserveHost = *req.PreserveHost
-	}
-	if req.RetryAttempts != nil {
-		dbRule.RetryAttempts = *req.RetryAttempts
-	}
-	if req.Active != nil {
-		dbRule.Active = *req.Active
-	}
-	if req.PluginChain != nil {
-		pluginChainBytes, err := json.Marshal(req.PluginChain)
-		if err != nil {
-			s.logger.WithError(err).Error("Failed to marshal plugin chain")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin chain"})
-			return
-		}
-		var pluginChain []types.PluginConfig
-		if err := json.Unmarshal(pluginChainBytes, &pluginChain); err != nil {
-			s.logger.WithError(err).Error("Failed to unmarshal plugin chain")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin chain"})
-			return
-		}
-		pluginChainMap, err := json.Marshal(pluginChain)
-		if err != nil {
-			s.logger.WithError(err).Error("Failed to marshal plugin chain")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin chain"})
-			return
-		}
-		var jsonMap map[string]interface{}
-		if err := json.Unmarshal(pluginChainMap, &jsonMap); err != nil {
-			s.logger.WithError(err).Error("Failed to unmarshal plugin chain")
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin chain"})
-			return
-		}
-		dbRule.PluginChain = models.JSONMap(jsonMap)
-	}
-
-	dbRule.UpdatedAt = time.Now()
-
-	// Save updated rule
-	if err := s.repo.UpdateRule(c, dbRule); err != nil {
-		s.logger.WithError(err).Error("Failed to update rule")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update rule"})
-		return
-	}
-
-	// Update rules cache
-	if err := s.updateRulesCache(c.Request.Context(), gatewayID); err != nil {
-		s.logger.WithError(err).Error("Failed to update rules cache")
-	}
-
-	// Convert response
-	response := s.getRuleResponse(dbRule)
-	c.JSON(http.StatusOK, response)
-}
-
-func (s *AdminServer) deleteForwardingRule(c *gin.Context) {
-	gatewayID := c.Param("gateway_id")
-	ruleID := c.Param("rule_id")
-
-	// Delete from database
-	if err := s.repo.DeleteRule(c, ruleID, gatewayID); err != nil {
-		s.logger.WithError(err).Error("Failed to delete rule")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete rule"})
-		return
-	}
-
-	// Update rules cache
-	s.updateRulesCache(c, gatewayID)
-
-	c.JSON(http.StatusOK, gin.H{"message": "Rule deleted successfully"})
-}
-
-// Helper functions
-func (s *AdminServer) getForwardingRules(c *gin.Context, gatewayID string) ([]types.ForwardingRule, error) {
-	key := fmt.Sprintf("rules:%s", gatewayID)
-	rulesJSON, err := s.cache.Get(c, key)
-	if err != nil {
-		if err.Error() == "redis: nil" {
-			return []types.ForwardingRule{}, nil
-		}
-		return nil, err
-	}
-
-	var rules []types.ForwardingRule
-	if err := json.Unmarshal([]byte(rulesJSON), &rules); err != nil {
-		return nil, err
-	}
-
-	return rules, nil
-}
-
-func (s *AdminServer) saveForwardingRules(c *gin.Context, gatewayID string, rules []types.ForwardingRule) error {
-	key := fmt.Sprintf("rules:%s", gatewayID)
-	rulesJSON, err := json.Marshal(rules)
-	if err != nil {
-		return err
-	}
-
-	return s.cache.Set(c, key, string(rulesJSON), 0)
-}
-
-func (s *AdminServer) saveForwardingRule(c *gin.Context, rule *types.ForwardingRule) error {
-	rules, err := s.getForwardingRules(c, rule.GatewayID)
-	if err != nil {
-		return err
-	}
-
-	rules = append(rules, *rule)
-	return s.saveForwardingRules(c, rule.GatewayID, rules)
-}
-
-func isPluginEnabled(pluginName string, enabledPlugins []string) bool {
-	for _, enabled := range enabledPlugins {
-		if enabled == pluginName {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *AdminServer) mergeRequiredPlugins(required map[string]types.PluginConfig, requested []types.PluginConfig) []types.PluginConfig {
-	result := make([]types.PluginConfig, 0)
-
-	// Add required plugins first
-	for _, plugin := range required {
-		result = append(result, plugin)
-	}
-
-	// Add requested plugins if they're not already required
-	for _, plugin := range requested {
-		if _, isRequired := required[plugin.Name]; !isRequired {
-			result = append(result, plugin)
-		}
-	}
-
-	return result
-}
-
-func defaultIfNil[T any](ptr *T, defaultValue T) T {
-	if ptr == nil {
-		return defaultValue
-	}
-	return *ptr
 }
 
 func (s *AdminServer) updateRulesCache(ctx context.Context, gatewayID string) error {
@@ -1032,63 +666,6 @@ func (s *AdminServer) updateRulesCache(ctx context.Context, gatewayID string) er
 	return nil
 }
 
-func (s *AdminServer) getGatewayByID(c *gin.Context) {
-	gatewayID := c.Param("gateway_id")
-
-	dbGateway, err := s.repo.GetGateway(c, gatewayID)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to get gateway")
-		c.JSON(http.StatusNotFound, gin.H{"error": "Gateway not found"})
-		return
-	}
-
-	requiredPlugins, err := dbGateway.RequiredPlugins.ToPluginConfigMap()
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to convert required plugins")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process gateway configuration"})
-		return
-	}
-
-	gateway := types.Gateway{
-		ID:              dbGateway.ID,
-		Name:            dbGateway.Name,
-		Subdomain:       dbGateway.Subdomain,
-		ApiKey:          dbGateway.ApiKey,
-		Status:          dbGateway.Status,
-		Tier:            dbGateway.Tier,
-		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
-		EnabledPlugins:  []string(dbGateway.EnabledPlugins),
-		RequiredPlugins: requiredPlugins,
-	}
-
-	c.JSON(http.StatusOK, gateway)
-}
-
-func (s *AdminServer) getGatewayBySubdomain(c *gin.Context) {
-	subdomain := c.Param("subdomain")
-
-	dbGateway, err := s.repo.GetGatewayBySubdomain(c, subdomain)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to get gateway")
-		c.JSON(http.StatusNotFound, gin.H{"error": "Gateway not found"})
-		return
-	}
-
-	gateway, err := s.convertDBGatewayToAPI(dbGateway)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to convert gateway")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process gateway configuration"})
-		return
-	}
-
-	if err := s.updateGatewayCache(c.Request.Context(), dbGateway); err != nil {
-		s.logger.WithError(err).Error("Failed to update gateway cache")
-	}
-
-	c.JSON(http.StatusOK, gateway)
-}
-
 func (s *AdminServer) updateGatewayCache(ctx context.Context, gateway *models.Gateway) error {
 	if err := validateGatewayID(gateway.ID); err != nil {
 		return fmt.Errorf("invalid gateway ID: %w", err)
@@ -1115,44 +692,20 @@ func (s *AdminServer) updateGatewayCache(ctx context.Context, gateway *models.Ga
 }
 
 func (s *AdminServer) convertDBGatewayToAPI(dbGateway *models.Gateway) (*types.Gateway, error) {
-	// Add validation for gateway ID
-	if err := validateGatewayID(dbGateway.ID); err != nil {
-		return nil, fmt.Errorf("invalid gateway data: %w", err)
-	}
-
-	// Initialize RequiredPlugins if it's nil or invalid
-	if !dbGateway.RequiredPlugins.IsValid() {
-		s.logger.WithFields(logrus.Fields{
-			"gateway_id": dbGateway.ID,
-			"plugins":    dbGateway.RequiredPlugins.String(),
-		}).Warn("Invalid or empty RequiredPlugins, resetting to empty object")
-
-		// Create empty plugins map and marshal to JSON
-		dbGateway.RequiredPlugins = models.EmptyJSONMap()
-	}
-
-	requiredPlugins, err := dbGateway.RequiredPlugins.ToPluginConfigMap()
-	if err != nil {
-		s.logger.WithError(err).WithFields(logrus.Fields{
-			"gateway_id": dbGateway.ID,
-			"plugins":    dbGateway.RequiredPlugins.String(),
-		}).Error("Failed to convert required plugins")
-		// Reset to empty object on error
-		dbGateway.RequiredPlugins = models.EmptyJSONMap()
-		requiredPlugins = map[string]types.PluginConfig{}
+	if dbGateway.RequiredPlugins == nil {
+		dbGateway.RequiredPlugins = []types.PluginConfig{}
 	}
 
 	return &types.Gateway{
 		ID:              dbGateway.ID,
 		Name:            dbGateway.Name,
 		Subdomain:       dbGateway.Subdomain,
-		ApiKey:          dbGateway.ApiKey,
 		Status:          dbGateway.Status,
 		Tier:            dbGateway.Tier,
+		EnabledPlugins:  dbGateway.EnabledPlugins,
+		RequiredPlugins: dbGateway.RequiredPlugins,
 		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
-		EnabledPlugins:  []string(dbGateway.EnabledPlugins),
-		RequiredPlugins: requiredPlugins,
 	}, nil
 }
 
@@ -1180,7 +733,7 @@ func (s *AdminServer) updateGatewaysList(ctx context.Context) error {
 
 		// Initialize required plugins if nil
 		if dbGateway.RequiredPlugins == nil {
-			dbGateway.RequiredPlugins = models.EmptyJSONMap()
+			dbGateway.RequiredPlugins = []types.PluginConfig{}
 		}
 
 		apiGateway, err := s.convertDBGatewayToAPI(&dbGateway)
@@ -1203,15 +756,6 @@ func (s *AdminServer) updateGatewaysList(ctx context.Context) error {
 
 	s.logger.WithField("count", len(apiGateways)).Info("Successfully updated gateways list in cache")
 	return nil
-}
-
-// validateSubdomain checks if a subdomain string meets the required format
-func validateSubdomain(subdomain string) bool {
-	// Only allow lowercase letters, numbers, and hyphens
-	// Must start and end with alphanumeric character
-	// Length between 3-63 characters
-	matched, _ := regexp.MatchString(`^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$`, subdomain)
-	return matched
 }
 
 // Helper function to validate gateway ID format
@@ -1258,72 +802,6 @@ func (s *AdminServer) getRuleResponse(rule *models.ForwardingRule) types.Forward
 		Public:        rule.Public,
 		CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
-	}
-}
-
-func convertDBJSONMapToMap(headers database.JSONMap) map[string]string {
-	result := make(map[string]string)
-	var rawMap map[string]interface{}
-	if err := json.Unmarshal([]byte(headers), &rawMap); err != nil {
-		return result
-	}
-	for k, v := range rawMap {
-		if strVal, ok := v.(string); ok {
-			result[k] = strVal
-		}
-	}
-	return result
-}
-
-func convertMapToDBJSONMap(headers map[string]string) database.JSONMap {
-	data, err := json.Marshal(headers)
-	if err != nil {
-		return database.JSONMap("{}")
-	}
-	return database.JSONMap(data)
-}
-
-func dbToGateway(dbGateway *database.Gateway) types.Gateway {
-	var requiredPlugins map[string]types.PluginConfig
-	if err := json.Unmarshal([]byte(dbGateway.RequiredPlugins), &requiredPlugins); err != nil {
-		requiredPlugins = make(map[string]types.PluginConfig)
-	}
-
-	return types.Gateway{
-		ID:              dbGateway.ID,
-		Name:            dbGateway.Name,
-		Subdomain:       dbGateway.Subdomain,
-		ApiKey:          dbGateway.ApiKey,
-		Status:          dbGateway.Status,
-		Tier:            dbGateway.Tier,
-		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
-		EnabledPlugins:  []string(dbGateway.EnabledPlugins),
-		RequiredPlugins: requiredPlugins,
-	}
-}
-
-func dbToRule(dbRule *database.ForwardingRule) types.ForwardingRule {
-	var pluginChain []types.PluginConfig
-	if err := json.Unmarshal([]byte(dbRule.PluginChain), &pluginChain); err != nil {
-		pluginChain = make([]types.PluginConfig, 0)
-	}
-
-	return types.ForwardingRule{
-		ID:            dbRule.ID,
-		GatewayID:     dbRule.GatewayID,
-		Path:          dbRule.Path,
-		Target:        dbRule.Target,
-		Methods:       []string(dbRule.Methods),
-		Headers:       convertDBJSONMapToMap(dbRule.Headers),
-		StripPath:     dbRule.StripPath,
-		PreserveHost:  dbRule.PreserveHost,
-		RetryAttempts: dbRule.RetryAttempts,
-		PluginChain:   pluginChain,
-		Active:        dbRule.Active,
-		Public:        dbRule.Public,
-		CreatedAt:     dbRule.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:     dbRule.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -1409,6 +887,13 @@ func (s *AdminServer) createRule(c *gin.Context) {
 
 	// Convert to API response
 	response := s.getRuleResponse(rule)
+
+	// After successfully creating the rule
+	if err := s.publishCacheInvalidation(c.Request.Context(), gatewayID); err != nil {
+		s.logger.WithError(err).Error("Failed to publish cache invalidation")
+		// Don't return error to client since rule was created successfully
+	}
+
 	c.JSON(http.StatusCreated, response)
 }
 
@@ -1540,6 +1025,11 @@ func (s *AdminServer) updateRule(c *gin.Context) {
 		return
 	}
 
+	// After successfully updating the rule
+	if err := s.publishCacheInvalidation(c.Request.Context(), gatewayID); err != nil {
+		s.logger.WithError(err).Error("Failed to publish cache invalidation")
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Rule updated successfully"})
 }
 
@@ -1593,6 +1083,11 @@ func (s *AdminServer) deleteRule(c *gin.Context) {
 		return
 	}
 
+	// After successfully deleting the rule
+	if err := s.publishCacheInvalidation(c.Request.Context(), gatewayID); err != nil {
+		s.logger.WithError(err).Error("Failed to publish cache invalidation")
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": "Rule deleted successfully"})
 }
 
@@ -1627,4 +1122,113 @@ func convertMapToDBHeaders(headers map[string]string) map[string]string {
 		result[k] = v
 	}
 	return result
+}
+
+func (s *AdminServer) invalidateCaches(gatewayID string) {
+	keys := common.GetCacheKeys(gatewayID)
+
+	// Clear Redis caches (affects all replicas)
+	s.cache.Delete(context.Background(), keys.Gateway)
+	s.cache.Delete(context.Background(), keys.Rules)
+	s.cache.Delete(context.Background(), keys.Plugin)
+
+	// Publish cache invalidation event
+	s.cache.Client().Publish(context.Background(), "cache:invalidate", gatewayID)
+}
+
+func (s *AdminServer) validatePluginConfig(plugin types.PluginConfig) error {
+	// Validate required fields
+	if plugin.Name == "" {
+		return fmt.Errorf("plugin name is required")
+	}
+
+	// Validate stage
+	if plugin.Stage == "" {
+		return fmt.Errorf("plugin stage is required")
+	}
+	validStages := map[types.Stage]bool{
+		types.PreRequest:   true,
+		types.PostRequest:  true,
+		types.PreResponse:  true,
+		types.PostResponse: true,
+	}
+	if !validStages[plugin.Stage] {
+		return fmt.Errorf("invalid plugin stage: %s", plugin.Stage)
+	}
+
+	// Validate priority (0-999, lower numbers execute first)
+	if plugin.Priority < 0 || plugin.Priority > 999 {
+		return fmt.Errorf("plugin priority must be between 0 and 999")
+	}
+
+	// Validate settings based on plugin type
+	switch plugin.Name {
+	case "rate_limiter":
+		if plugin.Stage != types.PreRequest {
+			return fmt.Errorf("rate limiter plugin must be in pre_request stage")
+		}
+		return validateRateLimiterSettings(plugin.Settings)
+	// Add other plugin validations here
+	default:
+		return fmt.Errorf("unknown plugin: %s", plugin.Name)
+	}
+}
+
+func validateRateLimiterSettings(settings map[string]interface{}) error {
+	// Validate limits
+	limits, ok := settings["limits"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("rate limiter requires 'limits' configuration")
+	}
+
+	// At least one limit type must be configured
+	if len(limits) == 0 {
+		return fmt.Errorf("rate limiter requires at least one limit configuration")
+	}
+
+	// Validate each limit configuration
+	for limitType, config := range limits {
+		limitConfig, ok := config.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("invalid limit configuration for %s", limitType)
+		}
+
+		// Validate limit value
+		limit, ok := limitConfig["limit"].(float64)
+		if !ok || limit <= 0 {
+			return fmt.Errorf("rate limiter requires positive 'limit' value for %s", limitType)
+		}
+
+		// Validate window
+		window, ok := limitConfig["window"].(string)
+		if !ok || window == "" {
+			return fmt.Errorf("rate limiter requires 'window' configuration for %s", limitType)
+		}
+	}
+
+	// Set default actions if not provided
+	if actions, exists := settings["actions"].(map[string]interface{}); !exists || actions == nil {
+		settings["actions"] = map[string]interface{}{
+			"type":        "reject",
+			"retry_after": "60",
+		}
+	}
+
+	return nil
+}
+
+func (s *AdminServer) publishCacheInvalidation(ctx context.Context, gatewayID string) error {
+	msg := map[string]string{
+		"type":      "cache_invalidation",
+		"gatewayID": gatewayID,
+	}
+
+	msgJSON, err := json.Marshal(msg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	// Get Redis client from cache
+	rdb := s.cache.Client()
+	return rdb.Publish(ctx, "gateway_events", string(msgJSON)).Err()
 }

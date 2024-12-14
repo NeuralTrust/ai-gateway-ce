@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,23 +14,65 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/valyala/fasthttp"
 
-	"ai-gateway-ce/internal/cache"
-	"ai-gateway-ce/internal/database"
 	"ai-gateway-ce/internal/middleware"
-	"ai-gateway-ce/internal/plugins"
-	"ai-gateway-ce/internal/types"
+	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/common"
+	"ai-gateway-ce/pkg/database"
+	"ai-gateway-ce/pkg/models"
+	"ai-gateway-ce/pkg/plugins"
+	"ai-gateway-ce/pkg/types"
 )
 
 type ProxyServer struct {
 	*BaseServer
-	repo *database.Repository
+	repo          *database.Repository
+	pluginFactory *plugins.PluginFactory
+	pluginManager *plugins.Manager
+	gatewayCache  *common.TTLMap
+	rulesCache    *common.TTLMap
+	pluginCache   *common.TTLMap
 }
 
+// Cache TTLs
+const (
+	GatewayCacheTTL = 1 * time.Hour
+	RulesCacheTTL   = 5 * time.Minute
+	PluginCacheTTL  = 30 * time.Minute
+)
+
 func NewProxyServer(config *Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *ProxyServer {
-	return &ProxyServer{
-		BaseServer: NewBaseServer(config, cache, repo, logger),
-		repo:       repo,
+	// Create TTL maps
+	gatewayCache := cache.CreateTTLMap("gateway", GatewayCacheTTL)
+	rulesCache := cache.CreateTTLMap("rules", RulesCacheTTL)
+	pluginCache := cache.CreateTTLMap("plugin", PluginCacheTTL)
+
+	// Create plugin factory and manager
+	pluginFactory := plugins.NewPluginFactory(cache, logger)
+	manager := plugins.NewManager(pluginFactory)
+
+	// Register available plugins
+	availablePlugins := []string{"rate_limiter", "external_validator"}
+	for _, pluginName := range availablePlugins {
+		if err := manager.RegisterPlugin(pluginName); err != nil {
+			logger.Fatalf("Failed to register plugin %s: %v", pluginName, err)
+		}
 	}
+
+	s := &ProxyServer{
+		BaseServer:    NewBaseServer(config, cache, repo, logger),
+		repo:          repo,
+		pluginFactory: pluginFactory,
+
+		pluginManager: manager,
+		gatewayCache:  gatewayCache,
+		rulesCache:    rulesCache,
+		pluginCache:   pluginCache,
+	}
+
+	// Subscribe to gateway events
+	go s.subscribeToEvents()
+
+	return s
 }
 
 func (s *ProxyServer) Run() error {
@@ -65,7 +108,7 @@ func (s *ProxyServer) Run() error {
 	s.router.Use(s.middlewareHandler())
 
 	// Add catch-all route for proxying
-	s.router.Any("/*path", s.handleForward)
+	s.router.Any("/*path", s.HandleForward)
 
 	// Start the server
 	return s.router.Run(fmt.Sprintf(":%d", s.config.ProxyPort))
@@ -79,13 +122,6 @@ func (s *ProxyServer) middlewareHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
 
-		s.logger.WithFields(logrus.Fields{
-			"path":    path,
-			"host":    c.Request.Host,
-			"method":  c.Request.Method,
-			"headers": c.Request.Header,
-		}).Debug("Processing request in middleware handler")
-
 		// Skip middleware for system endpoints
 		if strings.HasPrefix(path, "/__/") || path == "/health" {
 			s.logger.Debug("Skipping middleware for system endpoint")
@@ -93,53 +129,36 @@ func (s *ProxyServer) middlewareHandler() gin.HandlerFunc {
 		}
 
 		// First identify the gateway
-		s.logger.Debug("Running gateway identification middleware")
 		identifyHandler := gatewayMiddleware.IdentifyGateway()
 		identifyHandler(c)
 
-		s.logger.WithField("isAborted", c.IsAborted()).Debug("Gateway middleware completed")
 		if c.IsAborted() {
 			s.logger.Debug("Gateway identification failed")
 			return
 		}
 
-		// Check if it's a public route
 		isPublic := isPublicRoute(c, s.cache)
-		s.logger.WithField("isPublic", isPublic).Debug("Checked if route is public")
 
 		if !isPublic {
-			s.logger.Debug("Route is not public, validating API key")
 			validateHandler := authMiddleware.ValidateAPIKey()
 			validateHandler(c)
-
-			s.logger.WithFields(logrus.Fields{
-				"isAborted": c.IsAborted(),
-				"status":    c.Writer.Status(),
-			}).Debug("Auth middleware completed")
 
 			// If auth failed, stop here
 			if c.IsAborted() {
 				s.logger.Debug("API key validation failed")
 				return
 			}
-		} else {
-			s.logger.Debug("Route is public, skipping API key validation")
 		}
-
-		// If we get here, all middleware passed
-		s.logger.Debug("All middleware passed, continuing to next handler")
-
-		// Proceed to the next handler
 		c.Next()
 	}
 }
 
-func (s *ProxyServer) handleForward(c *gin.Context) {
-	s.logger.WithFields(logrus.Fields{
-		"path":   c.Request.URL.Path,
-		"method": c.Request.Method,
-		"host":   c.Request.Host,
-	}).Debug("Starting forward handler")
+func (s *ProxyServer) HandleForward(c *gin.Context) {
+	// Add logger to context
+	ctx := context.WithValue(c.Request.Context(), "logger", s.logger)
+
+	path := c.Request.URL.Path
+	method := c.Request.Method
 
 	// Get gateway ID from context
 	gatewayID, exists := c.Get(middleware.GatewayContextKey)
@@ -151,45 +170,63 @@ func (s *ProxyServer) handleForward(c *gin.Context) {
 
 	s.logger.WithFields(logrus.Fields{
 		"gatewayID": gatewayID,
-		"path":      c.Request.URL.Path,
-		"method":    c.Request.Method,
-		"headers":   c.Request.Header,
-	}).Debug("Handling forward request")
+		"path":      path,
+		"method":    method,
+	}).Debug("Processing request")
 
-	// Get rules for gateway
-	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
-	rulesJSON, err := s.cache.Get(c, rulesKey)
+	// Create the RequestContext
+	reqCtx := &types.RequestContext{
+		Context:   ctx,
+		GatewayID: gatewayID.(string),
+		Headers:   make(map[string][]string),
+		Method:    method,
+		Path:      path,
+		Query:     c.Request.URL.Query(),
+		Metadata:  make(map[string]interface{}),
+	}
+
+	// Read the request body
+	bodyData, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		s.logger.WithFields(logrus.Fields{
-			"error":     err.Error(),
-			"gatewayID": gatewayID,
-			"rulesKey":  rulesKey,
-		}).Error("Failed to get rules")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get rules"})
+		s.logger.WithError(err).Error("Failed to read request body")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read request body"})
+		return
+	}
+
+	// Set the body in the request context
+	reqCtx.Body = bodyData
+
+	// Restore the request body for later use
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyData))
+
+	// Copy request headers
+	for key, values := range c.Request.Header {
+		reqCtx.Headers[key] = values
+	}
+
+	// Create the ResponseContext
+	respCtx := &types.ResponseContext{
+		Context:   ctx,
+		GatewayID: gatewayID.(string),
+		Headers:   make(map[string][]string),
+		Metadata:  make(map[string]interface{}),
+	}
+
+	// Get gateway data with plugins
+	gatewayData, err := s.getGatewayData(ctx, gatewayID.(string))
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to get gateway data")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"gatewayID": gatewayID,
-		"rulesJSON": rulesJSON,
-	}).Debug("Retrieved rules from cache")
-
-	var rules []types.ForwardingRule
-	if err := json.Unmarshal([]byte(rulesJSON), &rules); err != nil {
-		s.logger.WithFields(logrus.Fields{
-			"error":     err.Error(),
-			"gatewayID": gatewayID,
-			"rulesJSON": rulesJSON,
-		}).Error("Failed to unmarshal rules")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to unmarshal rules"})
-		return
-	}
+		"gatewayData": gatewayData,
+	}).Debug("Gateway data")
 
 	// Find matching rule
-	path := c.Request.URL.Path
-	method := c.Request.Method
 	var matchingRule *types.ForwardingRule
-	for _, rule := range rules {
+	for _, rule := range gatewayData.Rules {
 		if !rule.Active {
 			continue
 		}
@@ -209,205 +246,63 @@ func (s *ProxyServer) handleForward(c *gin.Context) {
 
 		// Check path match
 		if strings.HasPrefix(path, rule.Path) {
-			// Create a copy of the rule to avoid modifying the slice element
 			ruleCopy := rule
 			matchingRule = &ruleCopy
 			break
 		}
 	}
 
+	s.logger.WithFields(logrus.Fields{
+		"matchingRule": matchingRule,
+	}).Debug("Matching rule")
+
 	if matchingRule == nil {
-		s.logger.WithFields(logrus.Fields{
-			"path":      path,
-			"method":    method,
-			"gatewayID": gatewayID,
-			"rules":     rules,
-		}).Error("No matching rule found")
 		c.JSON(http.StatusNotFound, gin.H{"error": "No matching rule found for path and method"})
 		return
 	}
 
-	s.logger.WithFields(logrus.Fields{
-		"rulePath":    matchingRule.Path,
-		"ruleTarget":  matchingRule.Target,
-		"stripPath":   matchingRule.StripPath,
-		"requestPath": path,
-		"pluginChain": matchingRule.PluginChain,
-	}).Debug("Found matching rule")
-
-	// Forward the request
-	targetURL := matchingRule.Target
-	if !matchingRule.StripPath {
-		targetURL += path
-	} else if strings.HasPrefix(path, matchingRule.Path) {
-		// If stripping path, remove the rule path prefix
-		targetURL += strings.TrimPrefix(path, matchingRule.Path)
-	}
-
-	s.logger.WithFields(logrus.Fields{
-		"targetURL":  targetURL,
-		"stripPath":  matchingRule.StripPath,
-		"origPath":   path,
-		"ruleTarget": matchingRule.Target,
-	}).Debug("Preparing forward request")
-
-	// Convert *http.Request to *fasthttp.Request
-	fasthttpReq, err := convertToFasthttpRequest(c.Request)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to convert *http.Request to *fasthttp.Request")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+	// Configure plugins for this request
+	if err := s.configurePlugins(gatewayData.Gateway, matchingRule); err != nil {
+		s.logger.WithError(err).Error("Failed to configure plugins")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure plugins"})
 		return
 	}
 
-	// Update fasthttpReq URI
-	fasthttpReq.SetRequestURI(targetURL)
-
-	// Set headers from rule
-	for key, value := range matchingRule.Headers {
-		fasthttpReq.Header.Set(key, value)
-		s.logger.WithFields(logrus.Fields{
-			"header": key,
-			"value":  value,
-		}).Debug("Adding custom header")
-	}
-
-	// Create the RequestContext
-	reqCtx := &types.RequestContext{
-		Context:   c.Request.Context(),
-		GatewayID: gatewayID.(string),
-		Headers:   make(map[string]string),
-		Method:    string(fasthttpReq.Header.Method()),
-		Path:      string(fasthttpReq.URI().Path()),
-		Request:   fasthttpReq,
-		Body:      fasthttpReq.Body(),
-	}
-
-	// Create the ResponseContext
-	respCtx := &types.ResponseContext{
-		Context:   c.Request.Context(),
-		GatewayID: gatewayID.(string),
-		Headers:   make(map[string]string),
-		Response:  nil,
-		Metadata:  make(map[string]interface{}),
-	}
-
 	// Execute pre-request plugins
-	if len(matchingRule.PluginChain) > 0 {
-		// Filter plugins by stage
-		var preRequestPlugins []types.PluginConfig
-		for _, plugin := range matchingRule.PluginChain {
-			if plugin.Stage == "pre_request" {
-				preRequestPlugins = append(preRequestPlugins, plugin)
-			}
-		}
-
-		if len(preRequestPlugins) > 0 {
-			pluginManager := plugins.NewManager(s.logger, s.cache.Client())
-			if err := pluginManager.ExecutePlugins(preRequestPlugins, reqCtx, respCtx); err != nil {
-				if pluginErr, ok := err.(*types.PluginError); ok {
-					c.JSON(pluginErr.StatusCode, gin.H{"error": pluginErr.Message})
-					return
+	if _, err := s.pluginManager.ExecuteStage(ctx, types.PreRequest, gatewayID.(string), matchingRule.ID, reqCtx, respCtx); err != nil {
+		if pluginErr, ok := err.(*types.PluginError); ok {
+			// Copy headers from response context
+			for k, values := range respCtx.Headers {
+				for _, v := range values {
+					c.Header(k, v)
 				}
-				s.logger.WithError(err).Error("Plugin execution error")
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Plugin execution failed"})
-				return
 			}
-
-			// Check for rate limit exceeded
-			if exceeded, ok := respCtx.Metadata["rate_limit_exceeded"].(bool); ok && exceeded {
-				limitType := respCtx.Metadata["rate_limit_type"].(string)
-				retryAfter := respCtx.Metadata["retry_after"].(string)
-				c.JSON(http.StatusTooManyRequests, gin.H{
-					"error":       fmt.Sprintf("Rate limit exceeded: %s rate limit exceeded", limitType),
-					"retry_after": retryAfter,
-				})
-				c.Header("Retry-After", retryAfter)
-				return
-			}
+			c.JSON(pluginErr.StatusCode, gin.H{
+				"error":       pluginErr.Message,
+				"retry_after": respCtx.Metadata["retry_after"],
+			})
+			return
 		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Plugin execution failed"})
+		return
 	}
 
-	// Forward the request using fasthttp.Client
-	client := &fasthttp.Client{
-		// Configure client as needed
-	}
-
-	resp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseResponse(resp)
-
-	if err := client.Do(reqCtx.Request, resp); err != nil {
+	// Forward the request
+	response, err := s.forwardRequest(reqCtx, matchingRule)
+	if err != nil {
 		s.logger.WithError(err).Error("Failed to forward request")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to forward request"})
 		return
 	}
 
-	// Update ResponseContext
-	respCtx.Response = resp
-
-	// Execute post-request plugins
-	if len(matchingRule.PluginChain) > 0 {
-		// Filter plugins by stage
-		var postRequestPlugins []types.PluginConfig
-		for _, plugin := range matchingRule.PluginChain {
-			if plugin.Stage == "post_request" {
-				postRequestPlugins = append(postRequestPlugins, plugin)
-			}
-		}
-
-		if len(postRequestPlugins) > 0 {
-			pluginManager := plugins.NewManager(s.logger, s.cache.Client())
-			if err := pluginManager.ExecutePlugins(postRequestPlugins, reqCtx, respCtx); err != nil {
-				if pluginErr, ok := err.(*types.PluginError); ok {
-					c.JSON(pluginErr.StatusCode, gin.H{"error": pluginErr.Message})
-					return
-				}
-				s.logger.WithError(err).Error("Plugin execution error")
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Plugin execution failed"})
-				return
-			}
+	// Copy response headers and status
+	for k, values := range response.Headers {
+		for _, v := range values {
+			c.Header(k, v)
 		}
 	}
 
-	// Write response back to client
-	writeFasthttpResponseToGin(c, resp)
-}
-
-// Helper function to convert *http.Request to *fasthttp.Request
-func convertToFasthttpRequest(req *http.Request) (*fasthttp.Request, error) {
-	fasthttpReq := fasthttp.AcquireRequest()
-	// Copy method
-	fasthttpReq.Header.SetMethod(req.Method)
-	// Copy URL
-	fasthttpReq.SetRequestURI(req.URL.String())
-	// Copy headers
-	for k, vv := range req.Header {
-		for _, v := range vv {
-			fasthttpReq.Header.Add(k, v)
-		}
-	}
-	// Copy body
-	bodyBytes, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
-	}
-	fasthttpReq.SetBody(bodyBytes)
-	// Reset the request body
-	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-	return fasthttpReq, nil
-}
-
-// Helper function to write fasthttp.Response to gin.Context
-func writeFasthttpResponseToGin(c *gin.Context, resp *fasthttp.Response) {
-	// Set status code
-	c.Status(resp.StatusCode())
-
-	// Copy headers
-	resp.Header.VisitAll(func(key, value []byte) {
-		c.Header(string(key), string(value))
-	})
-
-	// Write body
-	c.Writer.Write(resp.Body())
+	c.Data(response.StatusCode, "application/json", response.Body)
 }
 
 // Helper function to check if a route is public
@@ -438,4 +333,328 @@ func isPublicRoute(c *gin.Context, cache *cache.Cache) bool {
 	}
 
 	return false
+}
+
+func (s *ProxyServer) configurePlugins(gateway *types.Gateway, rule *types.ForwardingRule) error {
+	// Configure gateway-level plugins
+	gatewayChains := s.convertGatewayPlugins(gateway)
+
+	if err := s.pluginManager.SetPluginChain(types.GatewayLevel, gateway.ID, gatewayChains); err != nil {
+		return fmt.Errorf("failed to configure gateway plugins: %w", err)
+	}
+
+	// Configure rule-level plugins
+	s.logger.WithFields(logrus.Fields{
+		"rule": rule,
+	}).Debug("Configuring rule plugins")
+
+	if rule != nil && len(rule.PluginChain) > 0 {
+		s.logger.WithFields(logrus.Fields{
+			"ruleID":  rule.ID,
+			"plugins": len(rule.PluginChain),
+		}).Debug("Configuring rule plugins")
+
+		if err := s.pluginManager.SetPluginChain(types.RuleLevel, rule.ID, rule.PluginChain); err != nil {
+			return fmt.Errorf("failed to configure rule plugins: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (s *ProxyServer) getGatewayData(ctx context.Context, gatewayID string) (*types.GatewayData, error) {
+	logger := ctx.Value("logger").(*logrus.Logger)
+
+	// Try to get from memory cache first
+	if cached, ok := s.gatewayCache.Get(gatewayID); ok {
+		s.logger.WithFields(logrus.Fields{
+			"cached": cached,
+		}).Debug("Cached gateway data")
+		gatewayData := cached.(*types.GatewayData)
+		return gatewayData, nil
+	}
+
+	// Try to get from Redis cache
+	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
+	if rulesJSON, err := s.cache.Get(ctx, rulesKey); err == nil {
+		// Get gateway from database since we need gateway config
+		gateway, err := s.repo.GetGateway(ctx, gatewayID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get gateway: %w", err)
+		}
+
+		// Parse rules from cache
+		var rules []models.ForwardingRule
+		if err := json.Unmarshal([]byte(rulesJSON), &rules); err != nil {
+			logger.WithError(err).Warn("Failed to unmarshal rules from cache")
+		} else {
+			gatewayData := &types.GatewayData{
+				Gateway: convertModelToTypesGateway(gateway),
+				Rules:   convertModelToTypesRules(ctx, rules),
+			}
+
+			// Store in memory cache
+			s.gatewayCache.Set(gatewayID, gatewayData)
+
+			logger.WithFields(logrus.Fields{
+				"gatewayID":  gatewayID,
+				"rulesCount": len(rules),
+				"fromCache":  "redis",
+			}).Debug("Gateway rules found in Redis cache")
+
+			return gatewayData, nil
+		}
+	}
+
+	// Get from database as last resort
+	gateway, err := s.repo.GetGateway(ctx, gatewayID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get gateway: %w", err)
+	}
+
+	rules, err := s.repo.ListRules(ctx, gatewayID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get rules: %w", err)
+	}
+
+	// Convert models to types
+	gatewayData := &types.GatewayData{
+		Gateway: convertModelToTypesGateway(gateway),
+		Rules:   convertModelToTypesRules(ctx, rules),
+	}
+
+	// Store in both caches
+	rulesJSON, err := json.Marshal(rules)
+	if err == nil {
+		s.cache.Set(ctx, rulesKey, string(rulesJSON), 0)
+	}
+	s.gatewayCache.Set(gatewayID, gatewayData)
+
+	logger.WithFields(logrus.Fields{
+		"gatewayID":       gatewayID,
+		"enabledPlugins":  gateway.EnabledPlugins,
+		"requiredPlugins": gateway.RequiredPlugins,
+		"rulesCount":      len(rules),
+		"fromCache":       "database",
+	}).Debug("Loaded gateway data from database")
+
+	return gatewayData, nil
+}
+
+// Helper functions to convert between models and types
+func convertModelToTypesGateway(g *models.Gateway) *types.Gateway {
+	requiredPlugins := []types.PluginConfig{}
+
+	// Convert required plugins
+	for _, pluginConfig := range g.RequiredPlugins {
+		requiredPlugins = append(requiredPlugins, pluginConfig)
+	}
+
+	return &types.Gateway{
+		ID:              g.ID,
+		Name:            g.Name,
+		Subdomain:       g.Subdomain,
+		Status:          g.Status,
+		Tier:            g.Tier,
+		EnabledPlugins:  g.EnabledPlugins,
+		RequiredPlugins: requiredPlugins,
+	}
+}
+
+func convertModelToTypesRules(ctx context.Context, rules []models.ForwardingRule) []types.ForwardingRule {
+	logger := ctx.Value("logger").(*logrus.Logger)
+	var result []types.ForwardingRule
+	for _, r := range rules {
+		// Convert pq.StringArray to map[string]string
+		headers := make(map[string]string)
+		for _, h := range r.Headers {
+			parts := strings.SplitN(h, ":", 2)
+			if len(parts) == 2 {
+				headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+			}
+		}
+
+		// Create an intermediate structure to handle the wrapped plugins
+		var pluginWrapper struct {
+			Plugins []types.PluginConfig `json:"plugins"`
+		}
+
+		var pluginChain []types.PluginConfig
+		logger.WithFields(logrus.Fields{
+			"pluginChain": r.PluginChain,
+		}).Debug("Plugin chain")
+
+		if r.PluginChain != nil {
+			chainJSON, _ := json.Marshal(r.PluginChain)
+			if err := json.Unmarshal(chainJSON, &pluginWrapper); err != nil {
+				logger.WithError(err).Error("Failed to unmarshal plugin chain")
+			} else {
+				pluginChain = pluginWrapper.Plugins
+			}
+		}
+
+		result = append(result, types.ForwardingRule{
+			ID:            r.ID,
+			GatewayID:     r.GatewayID,
+			Path:          r.Path,
+			Target:        r.Target,
+			Methods:       r.Methods,
+			Headers:       headers,
+			StripPath:     r.StripPath,
+			PreserveHost:  r.PreserveHost,
+			RetryAttempts: r.RetryAttempts,
+			PluginChain:   pluginChain,
+			Active:        r.Active,
+			Public:        r.Public,
+			CreatedAt:     r.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:     r.UpdatedAt.Format(time.RFC3339),
+		})
+	}
+	return result
+}
+
+func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.ForwardingRule) (*types.ResponseContext, error) {
+	client := &fasthttp.Client{}
+	httpReq := fasthttp.AcquireRequest()
+	httpResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(httpReq)
+	defer fasthttp.ReleaseResponse(httpResp)
+
+	// Construct target URL
+	targetURL := rule.Target
+	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
+		targetURL = "https://" + targetURL // Default to HTTPS
+	}
+
+	// Add path to target URL
+	if rule.StripPath {
+		// Remove the rule's path prefix from the request path
+		targetPath := strings.TrimPrefix(req.Path, rule.Path)
+		targetURL = strings.TrimRight(targetURL, "/") + "/" + strings.TrimLeft(targetPath, "/")
+		// Remove trailing slash if the target doesn't have one
+		targetURL = strings.TrimSuffix(targetURL, "/")
+	} else {
+		targetURL = strings.TrimRight(targetURL, "/") + req.Path
+	}
+
+	// Add query parameters if any
+	if len(req.Query) > 0 {
+		targetURL += "?" + req.Query.Encode()
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"target":     targetURL,
+		"method":     req.Method,
+		"path":       req.Path,
+		"stripPath":  rule.StripPath,
+		"rulePath":   rule.Path,
+		"ruleTarget": rule.Target,
+	}).Debug("Forwarding request")
+
+	// Set request details
+	httpReq.SetRequestURI(targetURL)
+	httpReq.Header.SetMethod(req.Method)
+
+	// Copy headers
+	for k, values := range req.Headers {
+		for _, v := range values {
+			httpReq.Header.Add(k, v)
+		}
+	}
+
+	// Set body if present
+	if len(req.Body) > 0 {
+		httpReq.SetBody(req.Body)
+	}
+
+	// Make the request
+	if err := client.Do(httpReq, httpResp); err != nil {
+		return nil, fmt.Errorf("failed to forward request: %w", err)
+	}
+
+	// Convert to our Response type
+	response := &types.ResponseContext{
+		StatusCode: httpResp.StatusCode(),
+		Headers:    make(map[string][]string),
+		Body:       httpResp.Body(),
+	}
+
+	// Copy headers
+	httpResp.Header.VisitAll(func(key, value []byte) {
+		k := string(key)
+		v := string(value)
+		if response.Headers[k] == nil {
+			response.Headers[k] = make([]string, 0)
+		}
+		response.Headers[k] = append(response.Headers[k], v)
+	})
+
+	return response, nil
+}
+
+// Add getter for plugin manager
+func (s *ProxyServer) PluginManager() *plugins.Manager {
+	return s.pluginManager
+}
+
+func (s *ProxyServer) convertGatewayPlugins(gateway *types.Gateway) []types.PluginConfig {
+	var chains []types.PluginConfig
+
+	s.logger.WithFields(logrus.Fields{
+		"gatewayID":      gateway.ID,
+		"enabledPlugins": gateway.EnabledPlugins,
+	}).Debug("Converting gateway plugins")
+
+	for _, pluginName := range gateway.EnabledPlugins {
+		for _, config := range gateway.RequiredPlugins {
+			if config.Name == pluginName && config.Enabled {
+				pluginConfig := config
+				pluginConfig.Level = types.GatewayLevel
+				chains = append(chains, pluginConfig)
+			}
+		}
+	}
+	return chains
+}
+
+// InvalidateGatewayCache removes the gateway data from both memory and Redis cache
+func (s *ProxyServer) InvalidateGatewayCache(ctx context.Context, gatewayID string) error {
+	s.logger.WithFields(logrus.Fields{
+		"gatewayID": gatewayID,
+	}).Debug("Invalidating gateway cache")
+
+	// Remove from memory cache
+	s.gatewayCache.Delete(gatewayID)
+
+	// Remove from Redis cache
+	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
+	if err := s.cache.Delete(ctx, rulesKey); err != nil {
+		s.logger.WithError(err).Warn("Failed to delete rules from Redis cache")
+	}
+
+	return nil
+}
+
+func (s *ProxyServer) subscribeToEvents() {
+	// Get Redis client from cache
+	rdb := s.cache.Client()
+	pubsub := rdb.Subscribe(context.Background(), "gateway_events")
+	defer pubsub.Close()
+
+	// Listen for messages
+	ch := pubsub.Channel()
+	for msg := range ch {
+		var event map[string]string
+		if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
+			s.logger.WithError(err).Error("Failed to unmarshal event")
+			continue
+		}
+
+		if event["type"] == "cache_invalidation" {
+			gatewayID := event["gatewayID"]
+			if err := s.InvalidateGatewayCache(context.Background(), gatewayID); err != nil {
+				s.logger.WithError(err).Error("Failed to invalidate gateway cache")
+			}
+		}
+	}
 }

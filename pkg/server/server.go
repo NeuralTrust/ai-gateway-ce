@@ -8,8 +8,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 
-	"ai-gateway-ce/internal/cache"
-	"ai-gateway-ce/internal/database"
+	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/database"
 )
 
 // Server interface defines the common behavior for all servers

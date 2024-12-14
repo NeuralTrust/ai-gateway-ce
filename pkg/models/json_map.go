@@ -1,7 +1,7 @@
 package models
 
 import (
-	"ai-gateway-ce/internal/types"
+	"ai-gateway-ce/pkg/types"
 	"database/sql/driver"
 	"encoding/json"
 )

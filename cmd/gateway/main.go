@@ -8,8 +8,9 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
 
-	"ai-gateway-ce/internal/cache"
-	"ai-gateway-ce/internal/database"
+	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/common"
+	"ai-gateway-ce/pkg/database"
 	"ai-gateway-ce/pkg/server"
 )
 
@@ -90,12 +91,13 @@ func main() {
 	defer db.Close()
 
 	// Initialize cache with the database's GORM instance
-	cacheInstance, err := cache.NewCache(cache.Config{
+	cacheConfig := common.CacheConfig{
 		Host:     config.Redis.Host,
 		Port:     config.Redis.Port,
 		Password: config.Redis.Password,
 		DB:       config.Redis.DB,
-	}, db.DB)
+	}
+	cacheInstance, err := cache.NewCache(cacheConfig, db.DB)
 	if err != nil {
 		logger.Fatalf("Failed to initialize cache: %v", err)
 	}

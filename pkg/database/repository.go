@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	"ai-gateway-ce/internal/cache"
-	"ai-gateway-ce/internal/models"
+	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/models"
+	"ai-gateway-ce/pkg/types"
 
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"
@@ -79,22 +80,19 @@ func (r *Repository) IsValidAPIKeyFast(gatewayID, apiKey string) bool {
 // Gateway operations
 func (r *Repository) CreateGateway(ctx context.Context, gateway *models.Gateway) error {
 	if gateway.RequiredPlugins == nil {
-		gateway.RequiredPlugins = models.EmptyJSONMap()
+		gateway.RequiredPlugins = []types.PluginConfig{}
 	}
 	return r.db.Create(gateway).Error
 }
 
 func (r *Repository) GetGateway(ctx context.Context, id string) (*models.Gateway, error) {
 	var gateway models.Gateway
-	err := r.db.Model(&models.Gateway{}).Where("id = ?", id).Take(&gateway).Error
-	if err != nil {
+	if err := r.db.First(&gateway, "id = ?", id).Error; err != nil {
 		return nil, err
 	}
-
 	if gateway.RequiredPlugins == nil {
-		gateway.RequiredPlugins = models.EmptyJSONMap()
+		gateway.RequiredPlugins = []types.PluginConfig{}
 	}
-
 	return &gateway, nil
 }
 
@@ -106,7 +104,7 @@ func (r *Repository) GetGatewayBySubdomain(ctx context.Context, subdomain string
 	}
 
 	if gateway.RequiredPlugins == nil {
-		gateway.RequiredPlugins = models.EmptyJSONMap()
+		gateway.RequiredPlugins = []types.PluginConfig{}
 	}
 
 	return &gateway, nil
@@ -122,7 +120,7 @@ func (r *Repository) ListGateways(ctx context.Context, offset, limit int) ([]mod
 
 	for i := range gateways {
 		if gateways[i].RequiredPlugins == nil {
-			gateways[i].RequiredPlugins = models.EmptyJSONMap()
+			gateways[i].RequiredPlugins = []types.PluginConfig{}
 		}
 	}
 
@@ -130,14 +128,10 @@ func (r *Repository) ListGateways(ctx context.Context, offset, limit int) ([]mod
 }
 
 func (r *Repository) UpdateGateway(ctx context.Context, gateway *models.Gateway) error {
-	result := r.db.Save(gateway)
-	if result.Error != nil {
-		return result.Error
+	if gateway.RequiredPlugins == nil {
+		gateway.RequiredPlugins = []types.PluginConfig{}
 	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("gateway not found")
-	}
-	return nil
+	return r.db.Save(gateway).Error
 }
 
 func (r *Repository) DeleteGateway(ctx context.Context, id string) error {
@@ -264,9 +258,11 @@ func (r *Repository) DeleteAPIKey(ctx context.Context, id, gatewayID string) err
 
 func (r *Repository) SubdomainExists(ctx context.Context, subdomain string) (bool, error) {
 	var count int64
-	err := r.db.Model(&models.Gateway{}).Where("subdomain = ?", subdomain).Count(&count).Error
+	err := r.db.Model(&models.Gateway{}).
+		Where("subdomain = ?", subdomain).
+		Count(&count).Error
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("failed to check subdomain existence: %w", err)
 	}
 	return count > 0, nil
 }

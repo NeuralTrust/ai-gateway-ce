@@ -1,7 +1,7 @@
 package plugins
 
 import (
-	"ai-gateway-ce/internal/types"
+	"ai-gateway-ce/pkg/types"
 
 	"github.com/go-redis/redis/v8"
 	"github.com/sirupsen/logrus"
