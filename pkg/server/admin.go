@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"ai-gateway-ce/pkg/common"
 	"ai-gateway-ce/pkg/database"
 	"ai-gateway-ce/pkg/models"
+	"ai-gateway-ce/pkg/plugins"
 	"ai-gateway-ce/pkg/types"
 )
 
@@ -54,25 +56,18 @@ func isAlphanumeric(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 }
 
-// Helper functions for header conversion
-func convertHeadersToMap(headers []string) map[string]string {
-	result := make(map[string]string)
-	for _, header := range headers {
-		parts := strings.SplitN(header, ":", 2)
-		if len(parts) == 2 {
-			result[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-		}
-	}
-	return result
-}
-
 type AdminServer struct {
 	*BaseServer
+	pluginFactory *plugins.PluginFactory
 }
 
 func NewAdminServer(config *Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *AdminServer {
+	// Create plugin factory
+	pluginFactory := plugins.NewPluginFactory(cache, logger)
+
 	return &AdminServer{
-		BaseServer: NewBaseServer(config, cache, repo, logger),
+		BaseServer:    NewBaseServer(config, cache, repo, logger),
+		pluginFactory: pluginFactory,
 	}
 }
 
@@ -140,15 +135,6 @@ func (s *AdminServer) CreateGateway(c *gin.Context) {
 		return
 	}
 
-	// Validate required plugins
-	for _, plugin := range gateway.RequiredPlugins {
-		if err := s.validatePluginConfig(plugin); err != nil {
-			s.logger.WithError(err).WithField("plugin", plugin.Name).Error("Invalid plugin configuration")
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
-			return
-		}
-	}
-
 	s.logger.WithFields(logrus.Fields{
 		"gateway":          gateway,
 		"enabled_plugins":  gateway.EnabledPlugins,
@@ -159,6 +145,21 @@ func (s *AdminServer) CreateGateway(c *gin.Context) {
 	if gateway.RequiredPlugins == nil {
 		s.logger.Debug("Initializing empty RequiredPlugins slice")
 		gateway.RequiredPlugins = make([]types.PluginConfig, 0)
+	}
+
+	// Validate required plugins
+	for _, plugin := range gateway.RequiredPlugins {
+		validator, err := s.pluginFactory.GetValidator(plugin.Name)
+		if err != nil {
+			s.logger.WithError(err).WithField("plugin", plugin.Name).Error("Invalid plugin configuration")
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
+			return
+		}
+		if err := validator.ValidateConfig(plugin); err != nil {
+			s.logger.WithError(err).WithField("plugin", plugin.Name).Error("Invalid plugin configuration")
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
+			return
+		}
 	}
 
 	// Validate that all required plugins are also enabled
@@ -402,6 +403,17 @@ func (s *AdminServer) updateGateway(c *gin.Context) {
 
 		// Convert and validate plugins
 		for _, config := range req.RequiredPlugins {
+			validator, err := s.pluginFactory.GetValidator(config.Name)
+			if err != nil {
+				s.logger.WithError(err).WithField("plugin", config.Name).Error("Invalid plugin configuration")
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
+				return
+			}
+			if err := validator.ValidateConfig(config); err != nil {
+				s.logger.WithError(err).WithField("plugin", config.Name).Error("Invalid plugin configuration")
+				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
+				return
+			}
 			dbGateway.RequiredPlugins = append(dbGateway.RequiredPlugins, config)
 		}
 	}
@@ -601,44 +613,50 @@ func (s *AdminServer) updateRulesCache(ctx context.Context, gatewayID string) er
 		s.logger.WithFields(logrus.Fields{
 			"rule_id": rule.ID,
 			"path":    rule.Path,
-			"target":  rule.Target,
+			"targets": rule.Targets,
 			"methods": rule.Methods,
 		}).Debug("Converting rule")
 
-		// Convert plugin chain from JSON string to array
 		var pluginChain []types.PluginConfig
-		if len(rule.PluginChain) > 0 {
-			var wrapper struct {
-				Plugins []types.PluginConfig `json:"plugins"`
-			}
-			if err := json.Unmarshal(rule.PluginChain.ToBytes(), &wrapper); err != nil {
+		if rule.PluginChain != nil {
+			chainJSON, _ := json.Marshal(rule.PluginChain)
+			if err := json.Unmarshal(chainJSON, &pluginChain); err != nil {
 				s.logger.WithError(err).Error("Failed to unmarshal plugin chain")
 				continue
 			}
-			pluginChain = wrapper.Plugins
+		}
+
+		// Convert headers from []string to map[string]string
+		headers := make(map[string]string)
+		for _, h := range rule.Headers {
+			parts := strings.SplitN(h, ":", 2)
+			if len(parts) == 2 {
+				headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+			}
 		}
 
 		apiRules[i] = types.ForwardingRule{
 			ID:            rule.ID,
 			GatewayID:     rule.GatewayID,
 			Path:          rule.Path,
-			Target:        rule.Target,
+			Targets:       rule.Targets,
 			Methods:       []string(rule.Methods),
-			Headers:       convertHeadersToMap([]string(rule.Headers)),
+			Headers:       headers,
 			StripPath:     rule.StripPath,
 			PreserveHost:  rule.PreserveHost,
 			RetryAttempts: rule.RetryAttempts,
-			PluginChain:   pluginChain,
-			Active:        rule.Active,
-			Public:        rule.Public,
-			CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
+
+			PluginChain: pluginChain,
+			Active:      rule.Active,
+			Public:      rule.Public,
+			CreatedAt:   rule.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:   rule.UpdatedAt.Format(time.RFC3339),
 		}
 
 		s.logger.WithFields(logrus.Fields{
 			"rule_id":      apiRules[i].ID,
 			"path":         apiRules[i].Path,
-			"target":       apiRules[i].Target,
+			"targets":      apiRules[i].Targets,
 			"methods":      apiRules[i].Methods,
 			"plugin_chain": apiRules[i].PluginChain,
 		}).Debug("Converted rule")
@@ -774,16 +792,21 @@ func validateGatewayID(id string) error {
 
 func (s *AdminServer) getRuleResponse(rule *models.ForwardingRule) types.ForwardingRule {
 	var pluginChain []types.PluginConfig
-	if len(rule.PluginChain) > 0 {
-		// Extract the plugins array from the wrapper
-		var wrapper struct {
-			Plugins []types.PluginConfig `json:"plugins"`
-		}
-		if err := json.Unmarshal(rule.PluginChain.ToBytes(), &wrapper); err != nil {
+	if rule.PluginChain != nil {
+		// Convert JSONMap directly to []PluginConfig
+		chainJSON, _ := json.Marshal(rule.PluginChain)
+		if err := json.Unmarshal(chainJSON, &pluginChain); err != nil {
 			s.logger.WithError(err).Error("Failed to unmarshal plugin chain")
 			pluginChain = make([]types.PluginConfig, 0)
-		} else {
-			pluginChain = wrapper.Plugins
+		}
+	}
+
+	// Convert headers from pq.StringArray to map[string]string
+	headers := make(map[string]string)
+	for _, h := range rule.Headers {
+		parts := strings.SplitN(h, ":", 2)
+		if len(parts) == 2 {
+			headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 		}
 	}
 
@@ -791,9 +814,9 @@ func (s *AdminServer) getRuleResponse(rule *models.ForwardingRule) types.Forward
 		ID:            rule.ID,
 		GatewayID:     rule.GatewayID,
 		Path:          rule.Path,
-		Target:        rule.Target,
+		Targets:       rule.Targets,
 		Methods:       []string(rule.Methods),
-		Headers:       convertHeadersToMap([]string(rule.Headers)),
+		Headers:       headers,
 		StripPath:     rule.StripPath,
 		PreserveHost:  rule.PreserveHost,
 		RetryAttempts: rule.RetryAttempts,
@@ -815,19 +838,18 @@ func (s *AdminServer) createRule(c *gin.Context) {
 		return
 	}
 
-	// Validate required fields
-	if req.Path == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "path is required"})
-		return
-	}
-	if req.Target == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "target is required"})
+	// Validate the rule request
+	if err := s.validateRule(&req); err != nil {
+		s.logger.WithError(err).Error("Rule validation failed")
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Generate rule ID
-	ruleID := uuid.NewString()
-	now := time.Now()
+	// Convert headers to map[string]string format
+	headers := make(map[string]string)
+	for k, v := range req.Headers {
+		headers[k] = v
+	}
 
 	// Set default values for optional fields
 	stripPath := false
@@ -845,35 +867,26 @@ func (s *AdminServer) createRule(c *gin.Context) {
 		retryAttempts = *req.RetryAttempts
 	}
 
-	// Convert plugin chain to JSON map
-	var pluginChainMap models.JSONMap
-	if len(req.PluginChain) > 0 {
-		// Create a wrapper map that contains the array
-		wrapper := map[string]interface{}{
-			"plugins": req.PluginChain,
-		}
-		pluginChainMap = models.JSONMap(wrapper)
-	}
-
-	rule := &models.ForwardingRule{
-		ID:            ruleID,
+	// Create the database model
+	dbRule := &models.ForwardingRule{
+		ID:            uuid.NewString(),
 		GatewayID:     gatewayID,
 		Path:          req.Path,
-		Target:        req.Target,
-		Methods:       pq.StringArray(req.Methods),
-		Headers:       pq.StringArray(convertMapToHeaders(req.Headers)),
+		Targets:       req.Targets,
+		Methods:       req.Methods,
+		Headers:       headers,
 		StripPath:     stripPath,
 		PreserveHost:  preserveHost,
 		RetryAttempts: retryAttempts,
-		PluginChain:   pluginChainMap,
+		PluginChain:   req.PluginChain,
 		Active:        true,
 		Public:        false,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 
 	// Store in database
-	if err := s.repo.CreateRule(c, rule); err != nil {
+	if err := s.repo.CreateRule(c, dbRule); err != nil {
 		s.logger.WithError(err).Error("Failed to create rule")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create rule"})
 		return
@@ -885,8 +898,8 @@ func (s *AdminServer) createRule(c *gin.Context) {
 		// Continue anyway as rule is in DB
 	}
 
-	// Convert to API response
-	response := s.getRuleResponse(rule)
+	// Convert database model to API response type
+	response := s.getRuleResponse(dbRule)
 
 	// After successfully creating the rule
 	if err := s.publishCacheInvalidation(c.Request.Context(), gatewayID); err != nil {
@@ -930,6 +943,25 @@ func (s *AdminServer) updateRule(c *gin.Context) {
 		return
 	}
 
+	// Convert UpdateRuleRequest to CreateRuleRequest for validation
+	validateReq := types.CreateRuleRequest{
+		Path:          req.Path,
+		Targets:       req.Targets,
+		Methods:       req.Methods,
+		Headers:       req.Headers,
+		StripPath:     req.StripPath,
+		PreserveHost:  req.PreserveHost,
+		RetryAttempts: req.RetryAttempts,
+		PluginChain:   req.PluginChain,
+	}
+
+	// Validate the rule request
+	if err := s.validateRule(&validateReq); err != nil {
+		s.logger.WithError(err).Error("Rule validation failed")
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	// Get existing rules
 	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
 	rulesJSON, err := s.cache.Get(c, rulesKey)
@@ -953,8 +985,8 @@ func (s *AdminServer) updateRule(c *gin.Context) {
 			if req.Path != "" {
 				rules[i].Path = req.Path
 			}
-			if req.Target != "" {
-				rules[i].Target = req.Target
+			if req.Targets != nil {
+				rules[i].Targets = req.Targets
 			}
 			if len(req.Methods) > 0 {
 				rules[i].Methods = pq.StringArray(req.Methods)
@@ -1136,87 +1168,6 @@ func (s *AdminServer) invalidateCaches(gatewayID string) {
 	s.cache.Client().Publish(context.Background(), "cache:invalidate", gatewayID)
 }
 
-func (s *AdminServer) validatePluginConfig(plugin types.PluginConfig) error {
-	// Validate required fields
-	if plugin.Name == "" {
-		return fmt.Errorf("plugin name is required")
-	}
-
-	// Validate stage
-	if plugin.Stage == "" {
-		return fmt.Errorf("plugin stage is required")
-	}
-	validStages := map[types.Stage]bool{
-		types.PreRequest:   true,
-		types.PostRequest:  true,
-		types.PreResponse:  true,
-		types.PostResponse: true,
-	}
-	if !validStages[plugin.Stage] {
-		return fmt.Errorf("invalid plugin stage: %s", plugin.Stage)
-	}
-
-	// Validate priority (0-999, lower numbers execute first)
-	if plugin.Priority < 0 || plugin.Priority > 999 {
-		return fmt.Errorf("plugin priority must be between 0 and 999")
-	}
-
-	// Validate settings based on plugin type
-	switch plugin.Name {
-	case "rate_limiter":
-		if plugin.Stage != types.PreRequest {
-			return fmt.Errorf("rate limiter plugin must be in pre_request stage")
-		}
-		return validateRateLimiterSettings(plugin.Settings)
-	// Add other plugin validations here
-	default:
-		return fmt.Errorf("unknown plugin: %s", plugin.Name)
-	}
-}
-
-func validateRateLimiterSettings(settings map[string]interface{}) error {
-	// Validate limits
-	limits, ok := settings["limits"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("rate limiter requires 'limits' configuration")
-	}
-
-	// At least one limit type must be configured
-	if len(limits) == 0 {
-		return fmt.Errorf("rate limiter requires at least one limit configuration")
-	}
-
-	// Validate each limit configuration
-	for limitType, config := range limits {
-		limitConfig, ok := config.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("invalid limit configuration for %s", limitType)
-		}
-
-		// Validate limit value
-		limit, ok := limitConfig["limit"].(float64)
-		if !ok || limit <= 0 {
-			return fmt.Errorf("rate limiter requires positive 'limit' value for %s", limitType)
-		}
-
-		// Validate window
-		window, ok := limitConfig["window"].(string)
-		if !ok || window == "" {
-			return fmt.Errorf("rate limiter requires 'window' configuration for %s", limitType)
-		}
-	}
-
-	// Set default actions if not provided
-	if actions, exists := settings["actions"].(map[string]interface{}); !exists || actions == nil {
-		settings["actions"] = map[string]interface{}{
-			"type":        "reject",
-			"retry_after": "60",
-		}
-	}
-
-	return nil
-}
-
 func (s *AdminServer) publishCacheInvalidation(ctx context.Context, gatewayID string) error {
 	msg := map[string]string{
 		"type":      "cache_invalidation",
@@ -1231,4 +1182,111 @@ func (s *AdminServer) publishCacheInvalidation(ctx context.Context, gatewayID st
 	// Get Redis client from cache
 	rdb := s.cache.Client()
 	return rdb.Publish(ctx, "gateway_events", string(msgJSON)).Err()
+}
+
+func (s *AdminServer) validateRule(rule *types.CreateRuleRequest) error {
+	// Validate required fields
+	if rule.Path == "" {
+		return fmt.Errorf("path is required")
+	}
+
+	if len(rule.Methods) == 0 {
+		return fmt.Errorf("at least one method is required")
+	}
+
+	if len(rule.Targets) == 0 {
+		return fmt.Errorf("at least one target is required")
+	}
+
+	// Validate targets
+	totalWeight := 0
+	hasWeights := false
+	for i, target := range rule.Targets {
+		if target.URL == "" {
+			return fmt.Errorf("target %d: URL is required", i)
+		}
+
+		// Validate URL format
+		if _, err := url.Parse(target.URL); err != nil {
+			return fmt.Errorf("target %d: invalid URL format: %v", i, err)
+		}
+
+		if target.Weight > 0 {
+			hasWeights = true
+			totalWeight += target.Weight
+		}
+	}
+
+	// If any target has weight, all must have weights summing to 100
+	if hasWeights && totalWeight != 100 {
+		return fmt.Errorf("when using weighted distribution, weights must sum to 100 (got %d)", totalWeight)
+	}
+
+	// Validate methods
+	validMethods := map[string]bool{
+		"GET":     true,
+		"POST":    true,
+		"PUT":     true,
+		"DELETE":  true,
+		"PATCH":   true,
+		"HEAD":    true,
+		"OPTIONS": true,
+	}
+	for _, method := range rule.Methods {
+		if !validMethods[strings.ToUpper(method)] {
+			return fmt.Errorf("invalid HTTP method: %s", method)
+		}
+	}
+
+	// Validate plugin chain if present
+	if len(rule.PluginChain) > 0 {
+		for i, plugin := range rule.PluginChain {
+			if err := s.validatePlugin(plugin); err != nil {
+				return fmt.Errorf("plugin %d: %v", i, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *AdminServer) validatePlugin(plugin types.PluginConfig) error {
+	// Validate required fields
+	if plugin.Name == "" {
+		return fmt.Errorf("plugin name is required")
+	}
+
+	if plugin.Stage == "" {
+		return fmt.Errorf("plugin stage is required")
+	}
+
+	// Validate settings
+	if plugin.Settings == nil {
+		return fmt.Errorf("plugin settings are required")
+	}
+
+	// Validate stage
+	validStages := map[types.Stage]bool{
+		types.PreRequest:   true,
+		types.PostRequest:  true,
+		types.PreResponse:  true,
+		types.PostResponse: true,
+	}
+	if !validStages[plugin.Stage] {
+		return fmt.Errorf("invalid plugin stage: %s", plugin.Stage)
+	}
+
+	// Validate priority (0-999)
+	if plugin.Priority < 0 || plugin.Priority > 999 {
+		return fmt.Errorf("plugin priority must be between 0 and 999")
+	}
+
+	// Get plugin validator
+	validator, err := s.pluginFactory.GetValidator(plugin.Name)
+	if err != nil {
+		return fmt.Errorf("unknown plugin: %s", plugin.Name)
+	}
+
+	// Use plugin-specific validation
+	return validator.ValidateConfig(plugin)
 }

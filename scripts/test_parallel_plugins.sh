@@ -53,7 +53,7 @@ RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/test",
-    "target": "https://httpbin.org/anything",
+    "targets": [{"url": "https://httpbin.org/anything"}],
     "methods": ["POST"],
     "strip_path": true,
     "plugin_chain": [

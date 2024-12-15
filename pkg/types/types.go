@@ -31,26 +31,26 @@ type CreateAPIKeyRequest struct {
 }
 
 type CreateRuleRequest struct {
-	Path          string            `json:"path" binding:"required"`
-	Target        string            `json:"target" binding:"required"`
-	Methods       []string          `json:"methods"`
-	Headers       map[string]string `json:"headers"`
-	StripPath     *bool             `json:"strip_path"`
-	PreserveHost  *bool             `json:"preserve_host"`
-	RetryAttempts *int              `json:"retry_attempts"`
-	PluginChain   []PluginConfig    `json:"plugin_chain"`
+	Path          string             `json:"path" binding:"required"`
+	Targets       []ForwardingTarget `json:"targets" binding:"required"`
+	Methods       []string           `json:"methods"`
+	Headers       map[string]string  `json:"headers"`
+	StripPath     *bool              `json:"strip_path"`
+	PreserveHost  *bool              `json:"preserve_host"`
+	RetryAttempts *int               `json:"retry_attempts"`
+	PluginChain   []PluginConfig     `json:"plugin_chain"`
 }
 
 type UpdateRuleRequest struct {
-	Path          string            `json:"path"`
-	Target        string            `json:"target"`
-	Methods       []string          `json:"methods"`
-	Headers       map[string]string `json:"headers"`
-	StripPath     *bool             `json:"strip_path"`
-	PreserveHost  *bool             `json:"preserve_host"`
-	RetryAttempts *int              `json:"retry_attempts"`
-	Active        *bool             `json:"active"`
-	PluginChain   []PluginConfig    `json:"plugin_chain"`
+	Path          string             `json:"path"`
+	Targets       []ForwardingTarget `json:"targets"`
+	Methods       []string           `json:"methods"`
+	Headers       map[string]string  `json:"headers"`
+	StripPath     *bool              `json:"strip_path"`
+	PreserveHost  *bool              `json:"preserve_host"`
+	RetryAttempts *int               `json:"retry_attempts"`
+	Active        *bool              `json:"active"`
+	PluginChain   []PluginConfig     `json:"plugin_chain"`
 }
 
 // EvaluateCondition evaluates a response condition against a value

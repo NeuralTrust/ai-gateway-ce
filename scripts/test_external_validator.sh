@@ -20,7 +20,7 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "External Validator Company",
-    "subdomain": "ext-validator-59",
+    "subdomain": "ext-validator-2",
     "tier": "basic",
     "enabled_plugins": ["external_validator"]
   }')
@@ -65,7 +65,11 @@ curl -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/test",
-    "target": "https://httpbin.org/anything",
+    "targets": [
+        {
+            "url": "https://httpbin.org/anything"
+        }
+    ],
     "methods": ["POST"],
     "strip_path": true,
     "plugin_chain": [

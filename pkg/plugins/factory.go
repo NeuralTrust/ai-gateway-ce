@@ -33,3 +33,18 @@ func (f *PluginFactory) CreatePlugin(name string) (types.Plugin, error) {
 		return nil, fmt.Errorf("unknown plugin: %s", name)
 	}
 }
+
+type PluginValidator interface {
+	ValidateConfig(config types.PluginConfig) error
+}
+
+func (f *PluginFactory) GetValidator(name string) (PluginValidator, error) {
+	switch name {
+	case "rate_limiter":
+		return &rate_limiter.RateLimiterValidator{}, nil
+	case "external_validator":
+		return &external_validator.ExternalValidatorValidator{}, nil
+	default:
+		return nil, fmt.Errorf("unknown plugin: %s", name)
+	}
+}

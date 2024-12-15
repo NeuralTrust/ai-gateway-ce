@@ -18,7 +18,7 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Multi Rate Limited Gateway",
-    "subdomain": "multirate98",
+    "subdomain": "multirate5",
     "tier": "basic",
     "enabled_plugins": ["rate_limiter"],
     "required_plugins": [
@@ -85,7 +85,7 @@ RULE1_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/path1",
-    "target": "https://httpbin.org/get",
+    "targets": [{"url": "https://httpbin.org/get", "weight": 30}, {"url": "https://httpbin.org/anything", "weight": 70}],
     "methods": ["GET"],
     "strip_path": true
 }')
@@ -94,7 +94,7 @@ RULE2_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/path2",
-    "target": "https://httpbin.org/get",
+    "targets": [{"url": "https://httpbin.org/get", "weight": 30}, {"url": "https://httpbin.org/anything", "weight": 70}],
     "methods": ["GET"],
     "strip_path": true
 }')

@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,12 +27,13 @@ import (
 
 type ProxyServer struct {
 	*BaseServer
-	repo          *database.Repository
-	pluginFactory *plugins.PluginFactory
-	pluginManager *plugins.Manager
-	gatewayCache  *common.TTLMap
-	rulesCache    *common.TTLMap
-	pluginCache   *common.TTLMap
+	repo               *database.Repository
+	pluginFactory      *plugins.PluginFactory
+	pluginManager      *plugins.Manager
+	gatewayCache       *common.TTLMap
+	rulesCache         *common.TTLMap
+	pluginCache        *common.TTLMap
+	currentTargetIndex atomic.Uint32
 }
 
 // Cache TTLs
@@ -225,7 +228,7 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 	}).Debug("Gateway data")
 
 	// Find matching rule
-	var matchingRule *types.ForwardingRule
+	var matchingRule *models.ForwardingRule
 	for _, rule := range gatewayData.Rules {
 		if !rule.Active {
 			continue
@@ -246,8 +249,24 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 
 		// Check path match
 		if strings.HasPrefix(path, rule.Path) {
-			ruleCopy := rule
-			matchingRule = &ruleCopy
+			// Convert the rule to models.ForwardingRule
+			modelRule := models.ForwardingRule{
+				ID:            rule.ID,
+				GatewayID:     rule.GatewayID,
+				Path:          rule.Path,
+				Targets:       rule.Targets,
+				Methods:       rule.Methods,
+				Headers:       rule.Headers,
+				StripPath:     rule.StripPath,
+				PreserveHost:  rule.PreserveHost,
+				RetryAttempts: rule.RetryAttempts,
+				PluginChain:   rule.PluginChain,
+				Active:        rule.Active,
+				Public:        rule.Public,
+				CreatedAt:     time.Now(), // You might want to preserve the original timestamps
+				UpdatedAt:     time.Now(),
+			}
+			matchingRule = &modelRule
 			break
 		}
 	}
@@ -319,7 +338,7 @@ func isPublicRoute(c *gin.Context, cache *cache.Cache) bool {
 		return false
 	}
 
-	var rules []types.ForwardingRule
+	var rules []models.ForwardingRule
 	if err := json.Unmarshal([]byte(rulesJSON), &rules); err != nil {
 		return false
 	}
@@ -335,7 +354,7 @@ func isPublicRoute(c *gin.Context, cache *cache.Cache) bool {
 	return false
 }
 
-func (s *ProxyServer) configurePlugins(gateway *types.Gateway, rule *types.ForwardingRule) error {
+func (s *ProxyServer) configurePlugins(gateway *types.Gateway, rule *models.ForwardingRule) error {
 	// Configure gateway-level plugins
 	gatewayChains := s.convertGatewayPlugins(gateway)
 
@@ -462,7 +481,6 @@ func convertModelToTypesGateway(g *models.Gateway) *types.Gateway {
 }
 
 func convertModelToTypesRules(ctx context.Context, rules []models.ForwardingRule) []types.ForwardingRule {
-	logger := ctx.Value("logger").(*logrus.Logger)
 	var result []types.ForwardingRule
 	for _, r := range rules {
 		// Convert pq.StringArray to map[string]string
@@ -474,36 +492,18 @@ func convertModelToTypesRules(ctx context.Context, rules []models.ForwardingRule
 			}
 		}
 
-		// Create an intermediate structure to handle the wrapped plugins
-		var pluginWrapper struct {
-			Plugins []types.PluginConfig `json:"plugins"`
-		}
-
-		var pluginChain []types.PluginConfig
-		logger.WithFields(logrus.Fields{
-			"pluginChain": r.PluginChain,
-		}).Debug("Plugin chain")
-
-		if r.PluginChain != nil {
-			chainJSON, _ := json.Marshal(r.PluginChain)
-			if err := json.Unmarshal(chainJSON, &pluginWrapper); err != nil {
-				logger.WithError(err).Error("Failed to unmarshal plugin chain")
-			} else {
-				pluginChain = pluginWrapper.Plugins
-			}
-		}
-
+		// The plugin chain is already []types.PluginConfig, no need for wrapper
 		result = append(result, types.ForwardingRule{
 			ID:            r.ID,
 			GatewayID:     r.GatewayID,
 			Path:          r.Path,
-			Target:        r.Target,
+			Targets:       r.Targets,
 			Methods:       r.Methods,
 			Headers:       headers,
 			StripPath:     r.StripPath,
 			PreserveHost:  r.PreserveHost,
 			RetryAttempts: r.RetryAttempts,
-			PluginChain:   pluginChain,
+			PluginChain:   r.PluginChain, // Use directly, no need for conversion
 			Active:        r.Active,
 			Public:        r.Public,
 			CreatedAt:     r.CreatedAt.Format(time.RFC3339),
@@ -513,15 +513,27 @@ func convertModelToTypesRules(ctx context.Context, rules []models.ForwardingRule
 	return result
 }
 
-func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.ForwardingRule) (*types.ResponseContext, error) {
+func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *models.ForwardingRule) (*types.ResponseContext, error) {
 	client := &fasthttp.Client{}
 	httpReq := fasthttp.AcquireRequest()
 	httpResp := fasthttp.AcquireResponse()
 	defer fasthttp.ReleaseRequest(httpReq)
 	defer fasthttp.ReleaseResponse(httpResp)
 
-	// Construct target URL
-	targetURL := rule.Target
+	// Get target URL using the new selection method
+	var targetURL string
+	if len(rule.Targets) > 0 {
+		targetURL = s.selectTarget(rule)
+	} else {
+		// If no targets are specified, return error
+		return nil, fmt.Errorf("no targets specified for rule %s", rule.ID)
+	}
+
+	if targetURL == "" {
+		return nil, fmt.Errorf("no valid target found")
+	}
+
+	// Rest of the existing forwardRequest implementation...
 	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 		targetURL = "https://" + targetURL // Default to HTTPS
 	}
@@ -543,12 +555,12 @@ func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.Forw
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"target":     targetURL,
-		"method":     req.Method,
-		"path":       req.Path,
-		"stripPath":  rule.StripPath,
-		"rulePath":   rule.Path,
-		"ruleTarget": rule.Target,
+		"target":    targetURL,
+		"method":    req.Method,
+		"path":      req.Path,
+		"stripPath": rule.StripPath,
+		"rulePath":  rule.Path,
+		"targets":   rule.Targets,
 	}).Debug("Forwarding request")
 
 	// Set request details
@@ -657,4 +669,75 @@ func (s *ProxyServer) subscribeToEvents() {
 			}
 		}
 	}
+}
+
+func (s *ProxyServer) selectTarget(rule *models.ForwardingRule) string {
+	targets := rule.Targets
+	if len(targets) == 0 {
+		return ""
+	}
+
+	// Check if any weights are specified
+	hasWeights := false
+	totalWeight := 0
+	for _, target := range targets {
+		if target.Weight > 0 {
+			hasWeights = true
+			totalWeight += target.Weight
+		}
+	}
+
+	if hasWeights {
+		// Validate total weight is 100%
+		if totalWeight != 100 {
+			s.logger.WithFields(logrus.Fields{
+				"ruleID":      rule.ID,
+				"totalWeight": totalWeight,
+			}).Error("Invalid target weights - must sum to 100")
+			// Fallback to round-robin if weights are invalid
+			return s.roundRobinSelect(rule)
+		}
+
+		// Use Redis for consistent percentage-based distribution
+		counterKey := fmt.Sprintf("weight_counter:%s", rule.ID)
+		count, err := s.cache.Client().Incr(context.Background(), counterKey).Result()
+		if err != nil {
+			s.logger.WithError(err).Error("Failed to increment weight counter")
+			return targets[rand.Intn(len(targets))].URL
+		}
+
+		if count == 1 {
+			s.cache.Client().Expire(context.Background(), counterKey, 24*time.Hour)
+		}
+
+		// Calculate position (0-99)
+		position := count % 100
+		currentWeight := 0
+		for _, target := range targets {
+			currentWeight += target.Weight
+			if int64(currentWeight) > position {
+				return target.URL
+			}
+		}
+		return targets[len(targets)-1].URL
+	}
+
+	return s.roundRobinSelect(rule)
+}
+
+// Helper function for round-robin selection
+func (s *ProxyServer) roundRobinSelect(rule *models.ForwardingRule) string {
+	counterKey := fmt.Sprintf("target_counter:%s", rule.ID)
+	count, err := s.cache.Client().Incr(context.Background(), counterKey).Result()
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to increment target counter")
+		return rule.Targets[rand.Intn(len(rule.Targets))].URL
+	}
+
+	if count == 1 {
+		s.cache.Client().Expire(context.Background(), counterKey, 24*time.Hour)
+	}
+
+	index := (count - 1) % int64(len(rule.Targets))
+	return rule.Targets[index].URL
 }

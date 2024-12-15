@@ -20,7 +20,7 @@ CREATE TABLE forwarding_rules (
     id UUID PRIMARY KEY,
     gateway_id UUID NOT NULL REFERENCES gateways(id) ON DELETE CASCADE,
     path VARCHAR(255) NOT NULL,
-    target VARCHAR(255) NOT NULL,
+    targets JSONB NOT NULL DEFAULT '[]',
     methods JSONB NOT NULL DEFAULT '[]',
     headers JSONB NOT NULL DEFAULT '[]',
     strip_path BOOLEAN NOT NULL DEFAULT false,

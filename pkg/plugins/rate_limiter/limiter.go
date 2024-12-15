@@ -48,6 +48,62 @@ func (r *RateLimiter) Stages() []types.Stage {
 	return []types.Stage{types.PreRequest}
 }
 
+type RateLimiterValidator struct{}
+
+func (v *RateLimiterValidator) ValidateConfig(config types.PluginConfig) error {
+	if config.Stage != types.PreRequest {
+		return fmt.Errorf("rate limiter plugin must be in pre_request stage")
+	}
+
+	// Validate settings
+	settings := config.Settings
+	limits, ok := settings["limits"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("rate limiter requires 'limits' configuration")
+	}
+
+	// Validate each limit configuration
+	for limitType, config := range limits {
+		limitConfig, ok := config.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("invalid limit configuration for %s", limitType)
+		}
+
+		// Validate limit value
+		limit, ok := limitConfig["limit"].(float64)
+		if !ok || limit <= 0 {
+			return fmt.Errorf("rate limiter requires positive 'limit' value for %s", limitType)
+		}
+
+		// Validate window
+		window, ok := limitConfig["window"].(string)
+		if !ok || window == "" {
+			return fmt.Errorf("rate limiter requires 'window' configuration for %s", limitType)
+		}
+
+		// Validate window format
+		if _, err := time.ParseDuration(window); err != nil {
+			return fmt.Errorf("invalid window format for %s: %v", limitType, err)
+		}
+	}
+
+	actions, ok := settings["actions"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("rate limiter requires 'actions' configuration")
+	}
+
+	actionType, ok := actions["type"].(string)
+	if !ok {
+		return fmt.Errorf("rate limiter requires 'type' configuration")
+	}
+
+	if actionType != "reject" && actionType != "block" {
+		return fmt.Errorf("rate limiter requires 'type' to be 'reject' or 'block'")
+	}
+
+	return nil
+}
+
 func (r *RateLimiter) Execute(ctx context.Context, cfg types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
 	var config Config
 	if err := mapstructure.Decode(cfg.Settings, &config); err != nil {

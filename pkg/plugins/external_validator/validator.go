@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -43,6 +44,36 @@ func (v *ExternalValidator) Name() string {
 
 func (v *ExternalValidator) Stages() []types.Stage {
 	return []types.Stage{types.PreRequest}
+}
+
+type ExternalValidatorValidator struct{}
+
+func (v *ExternalValidatorValidator) ValidateConfig(config types.PluginConfig) error {
+	if config.Stage != types.PreRequest {
+		return fmt.Errorf("external validator must be in pre_request stage")
+	}
+
+	settings := config.Settings
+
+	// Validate endpoint
+	endpoint, ok := settings["endpoint"].(string)
+	if !ok || endpoint == "" {
+		return fmt.Errorf("external validator requires 'endpoint' configuration")
+	}
+
+	// Validate URL format
+	if _, err := url.Parse(endpoint); err != nil {
+		return fmt.Errorf("invalid endpoint URL format: %v", err)
+	}
+
+	// Validate timeout (optional)
+	if timeout, exists := settings["timeout"].(string); exists {
+		if _, err := time.ParseDuration(timeout); err != nil {
+			return fmt.Errorf("invalid timeout format: %v", err)
+		}
+	}
+
+	return nil
 }
 
 func (v *ExternalValidator) Execute(ctx context.Context, cfg types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
