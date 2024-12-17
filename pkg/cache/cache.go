@@ -25,7 +25,6 @@ func NewCache(config common.CacheConfig, db *gorm.DB) (*Cache, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr:     fmt.Sprintf("%s:%d", config.Host, config.Port),
 		Password: config.Password,
-		DB:       config.DB,
 	})
 
 	return &Cache{

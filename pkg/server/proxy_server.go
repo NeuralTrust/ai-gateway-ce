@@ -19,6 +19,7 @@ import (
 	"ai-gateway-ce/internal/middleware"
 	"ai-gateway-ce/pkg/cache"
 	"ai-gateway-ce/pkg/common"
+	"ai-gateway-ce/pkg/config"
 	"ai-gateway-ce/pkg/database"
 	"ai-gateway-ce/pkg/models"
 	"ai-gateway-ce/pkg/plugins"
@@ -43,7 +44,7 @@ const (
 	PluginCacheTTL  = 30 * time.Minute
 )
 
-func NewProxyServer(config *Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *ProxyServer {
+func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *ProxyServer {
 	// Create TTL maps
 	gatewayCache := cache.CreateTTLMap("gateway", GatewayCacheTTL)
 	rulesCache := cache.CreateTTLMap("rules", RulesCacheTTL)
@@ -114,12 +115,12 @@ func (s *ProxyServer) Run() error {
 	s.router.Any("/*path", s.HandleForward)
 
 	// Start the server
-	return s.router.Run(fmt.Sprintf(":%d", s.config.ProxyPort))
+	return s.router.Run(fmt.Sprintf(":%d", s.config.Server.ProxyPort))
 }
 
 // Combine middleware handling into a single function for better performance
 func (s *ProxyServer) middlewareHandler() gin.HandlerFunc {
-	gatewayMiddleware := middleware.NewGatewayMiddleware(s.logger, s.cache, s.config.BaseDomain)
+	gatewayMiddleware := middleware.NewGatewayMiddleware(s.logger, s.cache, s.config.Server.BaseDomain)
 	authMiddleware := middleware.NewAuthMiddleware(s.logger, s.repo)
 
 	return func(c *gin.Context) {

@@ -10,23 +10,32 @@ import (
 type Config struct {
 	Server   ServerConfig   `mapstructure:"server"`
 	Database DatabaseConfig `mapstructure:"database"`
+	Redis    RedisConfig    `mapstructure:"redis"`
 }
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
-	AdminPort int    `mapstructure:"admin_port"`
-	ProxyPort int    `mapstructure:"proxy_port"`
-	Host      string `mapstructure:"host"`
+	AdminPort  int    `mapstructure:"admin_port"`
+	ProxyPort  int    `mapstructure:"proxy_port"`
+	Host       string `mapstructure:"host"`
+	BaseDomain string `mapstructure:"base_domain"`
 }
 
 // DatabaseConfig holds database configuration
 type DatabaseConfig struct {
-	Host     string `mapstructure:"host"`
-	Port     int    `mapstructure:"port"`
-	User     string `mapstructure:"user"`
-	Password string `mapstructure:"password"`
-	DBName   string `mapstructure:"dbname"`
-	SSLMode  string `mapstructure:"sslmode"`
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	User     string `yaml:"user"`
+	Password string `yaml:"password"`
+	DBName   string `yaml:"dbname"`
+	SSLMode  string `yaml:"sslmode"`
+}
+
+type RedisConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Password string `yaml:"password"`
+	DB       int    `yaml:"db"`
 }
 
 var (
@@ -61,11 +70,16 @@ func Load() error {
 func setDefaults() {
 	viper.SetDefault("server.admin_port", 8080)
 	viper.SetDefault("server.proxy_port", 8081)
-	viper.SetDefault("server.host", "0.0.0.0")
+	viper.SetDefault("server.base_domain", "example.com")
 
 	viper.SetDefault("database.host", "localhost")
 	viper.SetDefault("database.port", 5432)
 	viper.SetDefault("database.sslmode", "disable")
+
+	viper.SetDefault("redis.host", "localhost")
+	viper.SetDefault("redis.port", 6379)
+	viper.SetDefault("redis.password", "")
+	viper.SetDefault("redis.db", 0)
 }
 
 // GetConfig returns the global configuration
@@ -81,4 +95,9 @@ func GetDatabaseConfig() DatabaseConfig {
 // GetServerConfig returns the server configuration
 func GetServerConfig() ServerConfig {
 	return globalConfig.Server
+}
+
+// GetRedisConfig returns the redis configuration
+func GetRedisConfig() RedisConfig {
+	return globalConfig.Redis
 }

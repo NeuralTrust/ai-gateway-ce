@@ -14,5 +14,5 @@ database:
   port: 5432
   user: postgres
   password: postgres
-  name: ai_gateway
+  dbname: ai_gateway
   ssl_mode: disable 

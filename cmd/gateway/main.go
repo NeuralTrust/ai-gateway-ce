@@ -10,6 +10,7 @@ import (
 
 	"ai-gateway-ce/pkg/cache"
 	"ai-gateway-ce/pkg/common"
+	"ai-gateway-ce/pkg/config"
 	"ai-gateway-ce/pkg/database"
 	"ai-gateway-ce/pkg/server"
 )
@@ -82,7 +83,7 @@ func main() {
 		Port:     config.Database.Port,
 		User:     config.Database.User,
 		Password: config.Database.Password,
-		DBName:   config.Database.Name,
+		DBName:   config.Database.DBName,
 		SSLMode:  config.Database.SSLMode,
 	})
 	if err != nil {
@@ -105,19 +106,12 @@ func main() {
 	// Initialize repository
 	repo := database.NewRepository(db.DB, logger, cacheInstance)
 
-	// Create server config
-	serverConfig := &server.Config{
-		AdminPort:  config.Server.AdminPort,
-		ProxyPort:  config.Server.ProxyPort,
-		BaseDomain: config.Server.BaseDomain,
-	}
-
 	var srv server.Server
 	switch serverType {
 	case "admin":
-		srv = server.NewAdminServer(serverConfig, cacheInstance, repo, logger)
+		srv = server.NewAdminServer(config, cacheInstance, repo, logger)
 	case "proxy":
-		srv = server.NewProxyServer(serverConfig, cacheInstance, repo, logger)
+		srv = server.NewProxyServer(config, cacheInstance, repo, logger)
 	default:
 		logger.Fatalf("Unknown server type: %s", serverType)
 	}
@@ -127,7 +121,7 @@ func main() {
 	}
 }
 
-func loadConfig() (*AppConfig, error) {
+func loadConfig() (*config.Config, error) {
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
 	viper.AddConfigPath(".")
@@ -137,7 +131,7 @@ func loadConfig() (*AppConfig, error) {
 		return nil, err
 	}
 
-	var config AppConfig
+	var config config.Config
 	if err := viper.Unmarshal(&config); err != nil {
 		return nil, err
 	}

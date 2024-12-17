@@ -20,6 +20,7 @@ import (
 
 	"ai-gateway-ce/pkg/cache"
 	"ai-gateway-ce/pkg/common"
+	"ai-gateway-ce/pkg/config"
 	"ai-gateway-ce/pkg/database"
 	"ai-gateway-ce/pkg/models"
 	"ai-gateway-ce/pkg/plugins"
@@ -61,7 +62,7 @@ type AdminServer struct {
 	pluginFactory *plugins.PluginFactory
 }
 
-func NewAdminServer(config *Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *AdminServer {
+func NewAdminServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *AdminServer {
 	// Create plugin factory
 	pluginFactory := plugins.NewPluginFactory(cache, logger)
 
@@ -110,7 +111,7 @@ func (s *AdminServer) Run() error {
 	s.setupRoutes()
 
 	// Start the server
-	addr := fmt.Sprintf(":%d", s.config.AdminPort)
+	addr := fmt.Sprintf(":%d", s.config.Server.AdminPort)
 	defer s.logger.WithField("addr", addr).Info("Starting admin server")
 	return s.runServer(addr)
 }

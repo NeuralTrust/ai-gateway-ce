@@ -9,6 +9,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/config"
 	"ai-gateway-ce/pkg/database"
 )
 
@@ -18,7 +19,7 @@ type Server interface {
 }
 
 type BaseServer struct {
-	config *Config
+	config *config.Config
 	cache  *cache.Cache
 	repo   *database.Repository
 	logger *logrus.Logger
@@ -32,7 +33,7 @@ func init() {
 	gin.DefaultWriter = io.Discard
 }
 
-func NewBaseServer(config *Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *BaseServer {
+func NewBaseServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *BaseServer {
 	// Create a new Gin router with default middleware
 	router := gin.New()
 
