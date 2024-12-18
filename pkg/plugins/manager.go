@@ -6,6 +6,7 @@ import (
 	"sort"
 	"sync"
 
+	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/types"
 
 	"github.com/sirupsen/logrus"
@@ -14,31 +15,25 @@ import (
 type Manager struct {
 	mu             sync.RWMutex
 	factory        *PluginFactory
-	plugins        map[string]types.Plugin
+	plugins        map[string]pluginiface.Plugin
 	configurations map[types.Level]map[string][]types.PluginConfig
 }
 
 func NewManager(factory *PluginFactory) *Manager {
 	return &Manager{
 		factory:        factory,
-		plugins:        make(map[string]types.Plugin),
+		plugins:        make(map[string]pluginiface.Plugin),
 		configurations: make(map[types.Level]map[string][]types.PluginConfig),
 	}
 }
 
-func (m *Manager) RegisterPlugin(name string) error {
+func (m *Manager) RegisterPlugin(plugin pluginiface.Plugin) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Check if plugin is already registered
+	name := plugin.Name()
 	if _, exists := m.plugins[name]; exists {
 		return fmt.Errorf("plugin %s already registered", name)
-	}
-
-	// Create plugin using factory
-	plugin, err := m.factory.CreatePlugin(name)
-	if err != nil {
-		return fmt.Errorf("failed to create plugin %s: %w", name, err)
 	}
 
 	m.plugins[name] = plugin
@@ -64,7 +59,7 @@ func (m *Manager) SetPluginChain(level types.Level, entityID string, chains []ty
 	return nil
 }
 
-func (m *Manager) ExecuteStage(ctx context.Context, stage types.Stage, gatewayID, ruleID string, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
+func (m *Manager) ExecuteStage(ctx context.Context, stage types.Stage, gatewayID, ruleID string, req *types.RequestContext, resp *types.ResponseContext) (*types.ResponseContext, error) {
 	m.mu.RLock()
 	// Get both gateway and rule level chains
 	gatewayChains := m.getChains(types.GatewayLevel, gatewayID, stage)
@@ -83,55 +78,50 @@ func (m *Manager) ExecuteStage(ctx context.Context, stage types.Stage, gatewayID
 
 	// Execute gateway-level chains first
 	if len(gatewayChains) > 0 {
-		logger.WithFields(logrus.Fields{
-			"stage":     stage,
-			"gatewayID": gatewayID,
-			"chains":    len(gatewayChains),
-		}).Debug("Executing gateway-level plugins")
-
-		pluginResp, err := m.executeChains(ctx, plugins, gatewayChains, req, resp)
-		if err != nil {
-			return nil, err
-		}
-		if pluginResp != nil {
-			return pluginResp, nil
+		if err := m.executeChains(ctx, plugins, gatewayChains, req, resp); err != nil {
+			return resp, err
 		}
 	}
 
 	// Then execute rule-level chains
 	if len(ruleChains) > 0 {
-		logger.WithFields(logrus.Fields{
-			"stage":  stage,
-			"ruleID": ruleID,
-			"chains": len(ruleChains),
-		}).Debug("Executing rule-level plugins")
-
-		return m.executeChains(ctx, plugins, ruleChains, req, resp)
-	}
-
-	return nil, nil
-}
-
-func (m *Manager) executeChains(ctx context.Context, plugins map[string]types.Plugin, chains []types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
-	for _, chain := range chains {
-		if chain.Parallel {
-			if err := m.executeParallel(ctx, plugins, []types.PluginConfig{chain}, req, resp); err != nil {
-				return nil, err
-			}
-		} else {
-			pluginResp, err := m.executeSequential(ctx, plugins, []types.PluginConfig{chain}, req, resp)
-			if err != nil {
-				return nil, err
-			}
-			if pluginResp != nil {
-				return pluginResp, nil
-			}
+		if err := m.executeChains(ctx, plugins, ruleChains, req, resp); err != nil {
+			return resp, err
 		}
 	}
-	return nil, nil
+
+	return resp, nil
 }
 
-func (m *Manager) executeParallel(ctx context.Context, plugins map[string]types.Plugin, configs []types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) error {
+func (m *Manager) executeChains(ctx context.Context, plugins map[string]pluginiface.Plugin, chains []types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) error {
+	// Group parallel and sequential chains
+	var parallelChains, sequentialChains []types.PluginConfig
+	for _, chain := range chains {
+		if chain.Parallel {
+			parallelChains = append(parallelChains, chain)
+		} else {
+			sequentialChains = append(sequentialChains, chain)
+		}
+	}
+
+	// Execute parallel chains first
+	if len(parallelChains) > 0 {
+		if err := m.executeParallel(ctx, plugins, parallelChains, req, resp); err != nil {
+			return err
+		}
+	}
+
+	// Then execute sequential chains
+	if len(sequentialChains) > 0 {
+		if err := m.executeSequential(ctx, plugins, sequentialChains, req, resp); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) executeParallel(ctx context.Context, plugins map[string]pluginiface.Plugin, configs []types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) error {
 	// Group plugins by priority
 	priorityGroups := make(map[int][]types.PluginConfig)
 	for _, cfg := range configs {
@@ -151,38 +141,78 @@ func (m *Manager) executeParallel(ctx context.Context, plugins map[string]types.
 	// Execute plugins by priority groups
 	for _, priority := range priorities {
 		group := priorityGroups[priority]
-
-		// Create error channel and wait group for this priority group
 		errChan := make(chan error, len(group))
+		type pluginResult struct {
+			config   types.PluginConfig
+			response *types.PluginResponse
+		}
+		respChan := make(chan pluginResult, len(group))
 		var wg sync.WaitGroup
 
-		// Launch all plugins in this priority group in parallel
+		// Create a context with cancel for this priority group
+		groupCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+
 		for _, cfg := range group {
 			wg.Add(1)
 			go func(cfg types.PluginConfig) {
 				defer wg.Done()
-				if plugin, exists := plugins[cfg.Name]; exists {
-					pluginResp, err := plugin.Execute(ctx, cfg, req, resp)
-					if err != nil {
-						errChan <- err
-					}
-					if pluginResp != nil {
-						// Handle plugin response
-						resp.StatusCode = pluginResp.StatusCode
-						resp.Body = []byte(pluginResp.Message)
+				select {
+				case <-groupCtx.Done():
+					return
+				default:
+					if plugin, exists := plugins[cfg.Name]; exists {
+						pluginResp, err := plugin.Execute(ctx, cfg, req, resp)
+						if err != nil {
+							errChan <- err
+							cancel() // Cancel other goroutines in this group
+							return
+						}
+						respChan <- pluginResult{config: cfg, response: pluginResp}
 					}
 				}
 			}(cfg)
 		}
 
-		// Wait for all plugins in this priority group to complete
 		wg.Wait()
 		close(errChan)
+		close(respChan)
 
-		// Check for errors from this priority group
+		// Check for errors
 		for err := range errChan {
 			if err != nil {
 				return err
+			}
+		}
+
+		// Collect all responses
+		var results []pluginResult
+		for result := range respChan {
+			results = append(results, result)
+		}
+
+		// Sort results by plugin priority
+		sort.Slice(results, func(i, j int) bool {
+			return results[i].config.Priority < results[j].config.Priority
+		})
+
+		// Apply responses in priority order
+		for _, result := range results {
+			if result.response != nil {
+				m.mu.Lock()
+				resp.StatusCode = result.response.StatusCode
+				resp.Body = result.response.Body
+				if result.response.Headers != nil {
+					for k, v := range result.response.Headers {
+						resp.Headers[k] = v
+					}
+				}
+				if result.response.Metadata != nil {
+					for k, v := range result.response.Metadata {
+						resp.Metadata[k] = v
+					}
+				}
+				m.mu.Unlock()
 			}
 		}
 	}
@@ -190,8 +220,7 @@ func (m *Manager) executeParallel(ctx context.Context, plugins map[string]types.
 	return nil
 }
 
-func (m *Manager) executeSequential(ctx context.Context, plugins map[string]types.Plugin, configs []types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
-	// Sort by priority
+func (m *Manager) executeSequential(ctx context.Context, plugins map[string]pluginiface.Plugin, configs []types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) error {
 	sortedConfigs := make([]types.PluginConfig, len(configs))
 	copy(sortedConfigs, configs)
 	sort.Slice(sortedConfigs, func(i, j int) bool {
@@ -206,15 +235,27 @@ func (m *Manager) executeSequential(ctx context.Context, plugins map[string]type
 		if plugin, exists := plugins[cfg.Name]; exists {
 			pluginResp, err := plugin.Execute(ctx, cfg, req, resp)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if pluginResp != nil {
-				// Return plugin response directly
-				return pluginResp, nil
+				resp.StatusCode = pluginResp.StatusCode
+				if pluginResp.Body != nil {
+					resp.Body = pluginResp.Body
+				}
+				if pluginResp.Headers != nil {
+					for k, v := range pluginResp.Headers {
+						resp.Headers[k] = v
+					}
+				}
+				if pluginResp.Metadata != nil {
+					for k, v := range pluginResp.Metadata {
+						resp.Metadata[k] = v
+					}
+				}
 			}
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 func (m *Manager) getChains(level types.Level, entityID string, stage types.Stage) []types.PluginConfig {
@@ -228,60 +269,6 @@ func (m *Manager) getChains(level types.Level, entityID string, stage types.Stag
 			}
 			return stageChains
 		}
-	}
-	return nil
-}
-
-func (m *Manager) ExecutePlugins(configs []types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) error {
-	// Convert RequestContext to Request
-	request := &types.RequestContext{
-		Context: req.Context,
-		Headers: req.Headers,
-		Method:  req.Method,
-		Path:    req.Path,
-		Query:   req.Query,
-		Body:    req.Body,
-	}
-
-	// Convert ResponseContext to Response
-	response := &types.ResponseContext{
-		Headers: resp.Headers,
-		Body:    resp.Body,
-	}
-
-	// Execute plugins
-	for _, cfg := range configs {
-		if plugin, exists := m.plugins[cfg.Name]; exists {
-			if _, err := plugin.Execute(req.Context, cfg, request, response); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Update response context
-	resp.Headers = response.Headers
-	resp.Body = response.Body
-	resp.Metadata["status_code"] = response.StatusCode
-
-	return nil
-}
-
-func (m *Manager) Execute(ctx context.Context, cfg types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) error {
-	plugin, err := m.factory.CreatePlugin(cfg.Name)
-	if err != nil {
-		return fmt.Errorf("failed to create plugin %s: %w", cfg.Name, err)
-	}
-
-	logger := ctx.Value("logger").(*logrus.Logger)
-	logger.WithFields(logrus.Fields{
-		"plugin": cfg.Name,
-		"stage":  cfg.Stage,
-		"level":  cfg.Level,
-	}).Debug("Executing plugin")
-
-	_, err = plugin.Execute(ctx, cfg, req, resp)
-	if err != nil {
-		return err
 	}
 	return nil
 }

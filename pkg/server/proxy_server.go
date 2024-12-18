@@ -9,7 +9,6 @@ import (
 	"math/rand"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,19 +21,21 @@ import (
 	"ai-gateway-ce/pkg/config"
 	"ai-gateway-ce/pkg/database"
 	"ai-gateway-ce/pkg/models"
+	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/plugins"
+	"ai-gateway-ce/pkg/plugins/external_api"
+	"ai-gateway-ce/pkg/plugins/rate_limiter"
 	"ai-gateway-ce/pkg/types"
 )
 
 type ProxyServer struct {
 	*BaseServer
-	repo               *database.Repository
-	pluginFactory      *plugins.PluginFactory
-	pluginManager      *plugins.Manager
-	gatewayCache       *common.TTLMap
-	rulesCache         *common.TTLMap
-	pluginCache        *common.TTLMap
-	currentTargetIndex atomic.Uint32
+	repo          *database.Repository
+	pluginFactory *plugins.PluginFactory
+	pluginManager *plugins.Manager
+	gatewayCache  *common.TTLMap
+	rulesCache    *common.TTLMap
+	pluginCache   *common.TTLMap
 }
 
 // Cache TTLs
@@ -44,7 +45,7 @@ const (
 	PluginCacheTTL  = 30 * time.Minute
 )
 
-func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *ProxyServer {
+func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger, extraPlugins ...pluginiface.Plugin) *ProxyServer {
 	// Create TTL maps
 	gatewayCache := cache.CreateTTLMap("gateway", GatewayCacheTTL)
 	rulesCache := cache.CreateTTLMap("rules", RulesCacheTTL)
@@ -55,11 +56,18 @@ func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Re
 	manager := plugins.NewManager(pluginFactory)
 
 	// Register available plugins
-	availablePlugins := []string{"rate_limiter", "external_validator"}
-	for _, pluginName := range availablePlugins {
-		if err := manager.RegisterPlugin(pluginName); err != nil {
-			logger.Fatalf("Failed to register plugin %s: %v", pluginName, err)
-		}
+	availablePlugins := []pluginiface.Plugin{
+		rate_limiter.NewRateLimiterPlugin(cache.Client()),
+		external_api.NewExternalApiPlugin(),
+	}
+
+	for _, plugin := range availablePlugins {
+		manager.RegisterPlugin(plugin)
+	}
+
+	// Register EE plugins
+	for _, plugin := range extraPlugins {
+		manager.RegisterPlugin(plugin)
 	}
 
 	s := &ProxyServer{

@@ -20,9 +20,9 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "External Validator Company",
-    "subdomain": "ext-validator-2",
+    "subdomain": "ext-validator-5",
     "tier": "basic",
-    "enabled_plugins": ["external_validator"]
+    "enabled_plugins": ["external_api"]
   }')
 
 # Extract fields from response
@@ -74,7 +74,7 @@ curl -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
     "strip_path": true,
     "plugin_chain": [
         {
-            "name": "external_validator",
+            "name": "external_api",
             "enabled": true,
             "priority": 0,
             "stage": "pre_request",

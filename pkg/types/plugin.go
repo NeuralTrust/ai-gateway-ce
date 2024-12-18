@@ -62,7 +62,9 @@ type PluginError struct {
 type PluginResponse struct {
 	StatusCode int
 	Message    string
-	Body       map[string]interface{}
+	Body       []byte
+	Headers    map[string][]string
+	Metadata   map[string]interface{}
 }
 
 func (e *PluginError) Error() string {

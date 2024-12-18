@@ -1,4 +1,4 @@
-package external_validator
+package external_api
 
 import (
 	"bytes"
@@ -10,12 +10,13 @@ import (
 	"strings"
 	"time"
 
+	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/types"
 
 	"github.com/sirupsen/logrus"
 )
 
-type ExternalValidator struct {
+type ExternalApiPlugin struct {
 	client *http.Client
 }
 
@@ -32,23 +33,21 @@ type Condition struct {
 	Message  string      `mapstructure:"message"`
 }
 
-func New() *ExternalValidator {
-	return &ExternalValidator{
-		client: &http.Client{},
-	}
+func (v *ExternalApiPlugin) Name() string {
+	return "external_api"
 }
 
-func (v *ExternalValidator) Name() string {
-	return "external_validator"
-}
-
-func (v *ExternalValidator) Stages() []types.Stage {
+func (v *ExternalApiPlugin) Stages() []types.Stage {
 	return []types.Stage{types.PreRequest}
 }
 
-type ExternalValidatorValidator struct{}
+func NewExternalApiPlugin() pluginiface.Plugin {
+	return &ExternalApiPlugin{client: &http.Client{}}
+}
 
-func (v *ExternalValidatorValidator) ValidateConfig(config types.PluginConfig) error {
+type ExternalApiValidator struct{}
+
+func (v *ExternalApiValidator) ValidateConfig(config types.PluginConfig) error {
 	if config.Stage != types.PreRequest {
 		return fmt.Errorf("external validator must be in pre_request stage")
 	}
@@ -76,7 +75,7 @@ func (v *ExternalValidatorValidator) ValidateConfig(config types.PluginConfig) e
 	return nil
 }
 
-func (v *ExternalValidator) Execute(ctx context.Context, cfg types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
+func (v *ExternalApiPlugin) Execute(ctx context.Context, cfg types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
 	logger := ctx.Value("logger").(*logrus.Logger)
 
 	settings := cfg.Settings
@@ -220,10 +219,15 @@ func (v *ExternalValidator) Execute(ctx context.Context, cfg types.PluginConfig,
 		}
 	}
 
+	respBody, err := json.Marshal(validationResp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal response: %w", err)
+	}
+
 	return &types.PluginResponse{
 		StatusCode: http.StatusOK,
 		Message:    "Validation passed",
-		Body:       validationResp,
+		Body:       respBody,
 	}, nil
 }
 
@@ -254,8 +258,4 @@ func evaluateCondition(actual interface{}, operator string, expected interface{}
 	default:
 		return false
 	}
-}
-
-func (v *ExternalValidator) Configure(cfg types.PluginConfig) error {
-	return nil
 }

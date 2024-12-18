@@ -7,15 +7,16 @@ import (
 	"strconv"
 	"time"
 
-	"ai-gateway-ce/pkg/types"
-
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/mitchellh/mapstructure"
 	"github.com/sirupsen/logrus"
+
+	"ai-gateway-ce/pkg/pluginiface"
+	"ai-gateway-ce/pkg/types"
 )
 
-type RateLimiter struct {
+type RateLimiterPlugin struct {
 	redis  *redis.Client
 	limits map[string]LimitConfig
 }
@@ -33,18 +34,18 @@ type Config struct {
 	} `mapstructure:"actions"`
 }
 
-func New(redisClient *redis.Client) *RateLimiter {
-	return &RateLimiter{
+func NewRateLimiterPlugin(redisClient *redis.Client) pluginiface.Plugin {
+	return &RateLimiterPlugin{
 		redis:  redisClient,
 		limits: make(map[string]LimitConfig),
 	}
 }
 
-func (r *RateLimiter) Name() string {
+func (r *RateLimiterPlugin) Name() string {
 	return "rate_limiter"
 }
 
-func (r *RateLimiter) Stages() []types.Stage {
+func (r *RateLimiterPlugin) Stages() []types.Stage {
 	return []types.Stage{types.PreRequest}
 }
 
@@ -104,7 +105,7 @@ func (v *RateLimiterValidator) ValidateConfig(config types.PluginConfig) error {
 	return nil
 }
 
-func (r *RateLimiter) Execute(ctx context.Context, cfg types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
+func (r *RateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
 	var config Config
 	if err := mapstructure.Decode(cfg.Settings, &config); err != nil {
 		return nil, fmt.Errorf("invalid rate limiter config: %w", err)
@@ -225,7 +226,7 @@ func (r *RateLimiter) Execute(ctx context.Context, cfg types.PluginConfig, req *
 	return nil, nil
 }
 
-func (r *RateLimiter) extractKey(req *types.RequestContext, limitType string) string {
+func (r *RateLimiterPlugin) extractKey(req *types.RequestContext, limitType string) string {
 	switch limitType {
 	case "global":
 		return "global"
@@ -272,9 +273,4 @@ func (r *RateLimiter) extractKey(req *types.RequestContext, limitType string) st
 	default:
 		return limitType
 	}
-}
-
-func (r *RateLimiter) Configure(cfg types.PluginConfig) error {
-	// Implementation goes here
-	return nil
 }

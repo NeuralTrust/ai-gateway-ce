@@ -6,7 +6,8 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"ai-gateway-ce/pkg/cache"
-	"ai-gateway-ce/pkg/plugins/external_validator"
+	"ai-gateway-ce/pkg/pluginiface"
+	"ai-gateway-ce/pkg/plugins/external_api"
 	"ai-gateway-ce/pkg/plugins/rate_limiter"
 	"ai-gateway-ce/pkg/types"
 )
@@ -23,12 +24,12 @@ func NewPluginFactory(cache *cache.Cache, logger *logrus.Logger) *PluginFactory 
 	}
 }
 
-func (f *PluginFactory) CreatePlugin(name string) (types.Plugin, error) {
+func (f *PluginFactory) CreatePlugin(name string) (pluginiface.Plugin, error) {
 	switch name {
 	case "rate_limiter":
-		return rate_limiter.New(f.cache.Client()), nil
-	case "external_validator":
-		return external_validator.New(), nil
+		return rate_limiter.NewRateLimiterPlugin(f.cache.Client()), nil
+	case "external_api":
+		return external_api.NewExternalApiPlugin(), nil
 	default:
 		return nil, fmt.Errorf("unknown plugin: %s", name)
 	}
@@ -42,8 +43,8 @@ func (f *PluginFactory) GetValidator(name string) (PluginValidator, error) {
 	switch name {
 	case "rate_limiter":
 		return &rate_limiter.RateLimiterValidator{}, nil
-	case "external_validator":
-		return &external_validator.ExternalValidatorValidator{}, nil
+	case "external_api":
+		return &external_api.ExternalApiValidator{}, nil
 	default:
 		return nil, fmt.Errorf("unknown plugin: %s", name)
 	}
