@@ -69,9 +69,5 @@ func (m *AuthMiddleware) ValidateAPIKey() gin.HandlerFunc {
 			})
 			return
 		}
-
-		// API key is valid, do not call c.Next() here
-		// Since we're calling this middleware directly, calling c.Next()
-		// would cause unintended behavior
 	}
 }

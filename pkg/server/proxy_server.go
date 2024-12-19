@@ -23,19 +23,17 @@ import (
 	"ai-gateway-ce/pkg/models"
 	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/plugins"
-	"ai-gateway-ce/pkg/plugins/external_api"
-	"ai-gateway-ce/pkg/plugins/rate_limiter"
 	"ai-gateway-ce/pkg/types"
 )
 
 type ProxyServer struct {
 	*BaseServer
 	repo          *database.Repository
-	pluginFactory *plugins.PluginFactory
 	pluginManager *plugins.Manager
 	gatewayCache  *common.TTLMap
 	rulesCache    *common.TTLMap
 	pluginCache   *common.TTLMap
+	skipAuthCheck bool
 }
 
 // Cache TTLs
@@ -45,46 +43,39 @@ const (
 	PluginCacheTTL  = 30 * time.Minute
 )
 
-func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger, extraPlugins ...pluginiface.Plugin) *ProxyServer {
+func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger, skipAuthCheck bool, extraPlugins ...pluginiface.Plugin) *ProxyServer {
+	// Initialize plugins
+	plugins.InitializePlugins(cache, logger)
+	manager := plugins.GetManager()
+
+	// Register extra plugins
+	for _, plugin := range extraPlugins {
+		manager.RegisterPlugin(plugin)
+	}
+
 	// Create TTL maps
 	gatewayCache := cache.CreateTTLMap("gateway", GatewayCacheTTL)
 	rulesCache := cache.CreateTTLMap("rules", RulesCacheTTL)
 	pluginCache := cache.CreateTTLMap("plugin", PluginCacheTTL)
 
-	// Create plugin factory and manager
-	pluginFactory := plugins.NewPluginFactory(cache, logger)
-	manager := plugins.NewManager(pluginFactory)
-
-	// Register available plugins
-	availablePlugins := []pluginiface.Plugin{
-		rate_limiter.NewRateLimiterPlugin(cache.Client()),
-		external_api.NewExternalApiPlugin(),
-	}
-
-	for _, plugin := range availablePlugins {
-		manager.RegisterPlugin(plugin)
-	}
-
-	// Register EE plugins
-	for _, plugin := range extraPlugins {
-		manager.RegisterPlugin(plugin)
-	}
-
 	s := &ProxyServer{
 		BaseServer:    NewBaseServer(config, cache, repo, logger),
 		repo:          repo,
-		pluginFactory: pluginFactory,
-
 		pluginManager: manager,
 		gatewayCache:  gatewayCache,
 		rulesCache:    rulesCache,
 		pluginCache:   pluginCache,
+		skipAuthCheck: skipAuthCheck,
 	}
 
 	// Subscribe to gateway events
 	go s.subscribeToEvents()
 
 	return s
+}
+
+func (s *ProxyServer) GetRouter() *gin.Engine {
+	return s.router
 }
 
 func (s *ProxyServer) Run() error {
@@ -151,7 +142,8 @@ func (s *ProxyServer) middlewareHandler() gin.HandlerFunc {
 
 		isPublic := isPublicRoute(c, s.cache)
 
-		if !isPublic {
+		// Skip auth check if skipAuthCheck is true (EE mode)
+		if !s.skipAuthCheck && !isPublic {
 			validateHandler := authMiddleware.ValidateAPIKey()
 			validateHandler(c)
 
@@ -179,12 +171,6 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-
-	s.logger.WithFields(logrus.Fields{
-		"gatewayID": gatewayID,
-		"path":      path,
-		"method":    method,
-	}).Debug("Processing request")
 
 	// Create the RequestContext
 	reqCtx := &types.RequestContext{
@@ -280,10 +266,6 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		}
 	}
 
-	s.logger.WithFields(logrus.Fields{
-		"matchingRule": matchingRule,
-	}).Debug("Matching rule")
-
 	if matchingRule == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "No matching rule found for path and method"})
 		return
@@ -323,11 +305,68 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		return
 	}
 
+	// Execute post-request plugins
+	if _, err := s.pluginManager.ExecuteStage(ctx, types.PostRequest, gatewayID.(string), matchingRule.ID, reqCtx, respCtx); err != nil {
+		if pluginErr, ok := err.(*types.PluginError); ok {
+			// Copy headers from response context
+			for k, values := range respCtx.Headers {
+				for _, v := range values {
+					c.Header(k, v)
+				}
+			}
+			c.JSON(pluginErr.StatusCode, gin.H{
+				"error":       pluginErr.Message,
+				"retry_after": respCtx.Metadata["retry_after"],
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Plugin execution failed"})
+		return
+	}
+
+	// Execute pre-response plugins
+	if _, err := s.pluginManager.ExecuteStage(ctx, types.PreResponse, gatewayID.(string), matchingRule.ID, reqCtx, respCtx); err != nil {
+		if pluginErr, ok := err.(*types.PluginError); ok {
+			// Copy headers from response context
+			for k, values := range respCtx.Headers {
+				for _, v := range values {
+					c.Header(k, v)
+				}
+			}
+			c.JSON(pluginErr.StatusCode, gin.H{
+				"error":       pluginErr.Message,
+				"retry_after": respCtx.Metadata["retry_after"],
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Plugin execution failed"})
+		return
+	}
+
 	// Copy response headers and status
 	for k, values := range response.Headers {
 		for _, v := range values {
 			c.Header(k, v)
 		}
+	}
+
+	// Execute post-response plugins
+	if _, err := s.pluginManager.ExecuteStage(ctx, types.PostResponse, gatewayID.(string), matchingRule.ID, reqCtx, respCtx); err != nil {
+		if pluginErr, ok := err.(*types.PluginError); ok {
+			// Copy headers from response context
+			for k, values := range respCtx.Headers {
+				for _, v := range values {
+					c.Header(k, v)
+				}
+			}
+			c.JSON(pluginErr.StatusCode, gin.H{
+				"error":       pluginErr.Message,
+				"retry_after": respCtx.Metadata["retry_after"],
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Plugin execution failed"})
+		return
 	}
 
 	c.Data(response.StatusCode, "application/json", response.Body)
@@ -418,7 +457,7 @@ func (s *ProxyServer) getGatewayData(ctx context.Context, gatewayID string) (*ty
 		} else {
 			gatewayData := &types.GatewayData{
 				Gateway: convertModelToTypesGateway(gateway),
-				Rules:   convertModelToTypesRules(ctx, rules),
+				Rules:   convertModelToTypesRules(rules),
 			}
 
 			// Store in memory cache
@@ -448,7 +487,7 @@ func (s *ProxyServer) getGatewayData(ctx context.Context, gatewayID string) (*ty
 	// Convert models to types
 	gatewayData := &types.GatewayData{
 		Gateway: convertModelToTypesGateway(gateway),
-		Rules:   convertModelToTypesRules(ctx, rules),
+		Rules:   convertModelToTypesRules(rules),
 	}
 
 	// Store in both caches
@@ -460,7 +499,6 @@ func (s *ProxyServer) getGatewayData(ctx context.Context, gatewayID string) (*ty
 
 	logger.WithFields(logrus.Fields{
 		"gatewayID":       gatewayID,
-		"enabledPlugins":  gateway.EnabledPlugins,
 		"requiredPlugins": gateway.RequiredPlugins,
 		"rulesCount":      len(rules),
 		"fromCache":       "database",
@@ -483,13 +521,11 @@ func convertModelToTypesGateway(g *models.Gateway) *types.Gateway {
 		Name:            g.Name,
 		Subdomain:       g.Subdomain,
 		Status:          g.Status,
-		Tier:            g.Tier,
-		EnabledPlugins:  g.EnabledPlugins,
 		RequiredPlugins: requiredPlugins,
 	}
 }
 
-func convertModelToTypesRules(ctx context.Context, rules []models.ForwardingRule) []types.ForwardingRule {
+func convertModelToTypesRules(rules []models.ForwardingRule) []types.ForwardingRule {
 	var result []types.ForwardingRule
 	for _, r := range rules {
 		// Convert pq.StringArray to map[string]string

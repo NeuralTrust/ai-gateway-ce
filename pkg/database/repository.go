@@ -203,9 +203,6 @@ func (r *Repository) CreateAPIKey(ctx context.Context, apiKey *models.APIKey) er
 	if apiKey.CreatedAt.IsZero() {
 		apiKey.CreatedAt = now
 	}
-	if apiKey.UpdatedAt.IsZero() {
-		apiKey.UpdatedAt = now
-	}
 
 	if !apiKey.Active {
 		apiKey.Active = true

@@ -9,7 +9,6 @@ import (
 	"ai-gateway-ce/pkg/types"
 
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 	"gorm.io/gorm"
 )
 
@@ -44,8 +43,6 @@ type Gateway struct {
 	Name            string            `json:"name"`
 	Subdomain       string            `json:"subdomain" gorm:"uniqueIndex"`
 	Status          string            `json:"status"`
-	Tier            string            `json:"tier"`
-	EnabledPlugins  pq.StringArray    `json:"enabled_plugins" gorm:"type:text[]"`
 	RequiredPlugins PluginConfigSlice `json:"required_plugins" gorm:"type:jsonb"`
 	CreatedAt       time.Time         `json:"created_at"`
 	UpdatedAt       time.Time         `json:"updated_at"`

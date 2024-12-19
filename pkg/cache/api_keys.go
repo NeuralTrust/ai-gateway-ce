@@ -39,7 +39,7 @@ func (c *Cache) ValidateAPIKey(gatewayID, apiKey string) bool {
 	}
 
 	now := time.Now()
-	return key.Active && (key.ExpiresAt == nil || key.ExpiresAt.After(now))
+	return key.Active && (key.ExpiresAt.IsZero() || key.ExpiresAt.After(now))
 }
 
 func (c *Cache) GetAPIKey(gatewayID, apiKey string) (*models.APIKey, error) {

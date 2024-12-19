@@ -18,12 +18,12 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Multi Rate Limited Gateway",
-    "subdomain": "multirate8",
+    "subdomain": "multirate10",
     "tier": "basic",
-    "enabled_plugins": ["rate_limiter"],
+    "enabled_plugins": ["advanced_rate_limiter"],
     "required_plugins": [
         {
-            "name": "rate_limiter",
+            "name": "advanced_rate_limiter",
             "enabled": true,
             "stage": "pre_request",
             "priority": 1,

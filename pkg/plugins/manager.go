@@ -6,25 +6,64 @@ import (
 	"sort"
 	"sync"
 
-	"ai-gateway-ce/pkg/pluginiface"
-	"ai-gateway-ce/pkg/types"
-
 	"github.com/sirupsen/logrus"
+
+	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/pluginiface"
+	"ai-gateway-ce/pkg/plugins/external_api"
+	"ai-gateway-ce/pkg/plugins/rate_limiter"
+	"ai-gateway-ce/pkg/types"
+)
+
+var (
+	instance *Manager
+	once     sync.Once
 )
 
 type Manager struct {
 	mu             sync.RWMutex
-	factory        *PluginFactory
+	cache          *cache.Cache
+	logger         *logrus.Logger
 	plugins        map[string]pluginiface.Plugin
 	configurations map[types.Level]map[string][]types.PluginConfig
 }
 
-func NewManager(factory *PluginFactory) *Manager {
-	return &Manager{
-		factory:        factory,
-		plugins:        make(map[string]pluginiface.Plugin),
-		configurations: make(map[types.Level]map[string][]types.PluginConfig),
+func GetManager() *Manager {
+	once.Do(func() {
+		instance = &Manager{
+			plugins:        make(map[string]pluginiface.Plugin),
+			configurations: make(map[types.Level]map[string][]types.PluginConfig),
+		}
+	})
+	return instance
+}
+
+func InitManager(cache *cache.Cache, logger *logrus.Logger) {
+	manager := GetManager()
+	manager.cache = cache
+	manager.logger = logger
+}
+
+func InitializePlugins(cache *cache.Cache, logger *logrus.Logger) {
+	InitManager(cache, logger)
+	manager := GetManager()
+
+	// Register built-in plugins
+	manager.RegisterPlugin(rate_limiter.NewRateLimiterPlugin(cache.Client()))
+	manager.RegisterPlugin(external_api.NewExternalApiPlugin())
+}
+
+// ValidatePlugin validates a plugin configuration
+func (m *Manager) ValidatePlugin(name string, config types.PluginConfig) error {
+	plugin, exists := m.plugins[name]
+	if !exists {
+		return fmt.Errorf("unknown plugin: %s", name)
 	}
+
+	if validator, ok := plugin.(pluginiface.PluginValidator); ok {
+		return validator.ValidateConfig(config)
+	}
+	return nil
 }
 
 func (m *Manager) RegisterPlugin(plugin pluginiface.Plugin) error {
@@ -67,20 +106,12 @@ func (m *Manager) ExecuteStage(ctx context.Context, stage types.Stage, gatewayID
 	plugins := m.plugins
 	m.mu.RUnlock()
 
-	logger := ctx.Value("logger").(*logrus.Logger)
-	logger.WithFields(logrus.Fields{
-		"stage":         stage,
-		"gatewayID":     gatewayID,
-		"ruleID":        ruleID,
-		"gatewayChains": len(gatewayChains),
-		"ruleChains":    len(ruleChains),
-	}).Debug("Executing plugin stage")
-
 	// Execute gateway-level chains first
 	if len(gatewayChains) > 0 {
 		if err := m.executeChains(ctx, plugins, gatewayChains, req, resp); err != nil {
 			return resp, err
 		}
+
 	}
 
 	// Then execute rule-level chains
@@ -271,4 +302,11 @@ func (m *Manager) getChains(level types.Level, entityID string, stage types.Stag
 		}
 	}
 	return nil
+}
+
+// GetPlugin returns a plugin by name
+func (m *Manager) GetPlugin(name string) pluginiface.Plugin {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.plugins[name]
 }

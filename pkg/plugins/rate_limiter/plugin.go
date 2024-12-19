@@ -10,7 +10,6 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/mitchellh/mapstructure"
-	"github.com/sirupsen/logrus"
 
 	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/types"
@@ -116,15 +115,6 @@ func (r *RateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginConfig,
 		resp.Headers = make(map[string][]string)
 	}
 
-	logger := ctx.Value("logger").(*logrus.Logger)
-	logger.WithFields(logrus.Fields{
-		"plugin": "rate_limiter",
-		"config": config,
-		"level":  cfg.Level,
-		"id":     cfg.ID,
-	}).Debug("Executing rate limiter plugin")
-
-	// Track rate limits independently
 	type limitStatus struct {
 		exceeded     bool
 		limitType    string

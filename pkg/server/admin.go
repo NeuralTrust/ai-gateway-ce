@@ -23,6 +23,7 @@ import (
 	"ai-gateway-ce/pkg/config"
 	"ai-gateway-ce/pkg/database"
 	"ai-gateway-ce/pkg/models"
+	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/plugins"
 	"ai-gateway-ce/pkg/types"
 )
@@ -59,24 +60,33 @@ func isAlphanumeric(c byte) bool {
 
 type AdminServer struct {
 	*BaseServer
-	pluginFactory *plugins.PluginFactory
 }
 
-func NewAdminServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger) *AdminServer {
-	// Create plugin factory
-	pluginFactory := plugins.NewPluginFactory(cache, logger)
+func NewAdminServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger, eePlugins ...pluginiface.Plugin) *AdminServer {
+	// Initialize plugins
+	plugins.InitializePlugins(cache, logger)
+
+	// Register extra plugins
+	for _, plugin := range eePlugins {
+		plugins.GetManager().RegisterPlugin(plugin)
+	}
 
 	return &AdminServer{
-		BaseServer:    NewBaseServer(config, cache, repo, logger),
-		pluginFactory: pluginFactory,
+		BaseServer: NewBaseServer(config, cache, repo, logger),
 	}
 }
 
-func (s *AdminServer) setupRoutes() {
-	// API v1 group
-	v1 := s.router.Group("/api/v1")
+func (s *AdminServer) AddRoutes(router *gin.RouterGroup) {
+	// Base routes that are common to both CE and EE editions
+	s.addBaseRoutes(router)
+
+	// Note: EE version can call this method and then add its own additional routes
+}
+
+// addBaseRoutes adds the core/common routes used in both CE and EE editions
+func (s *AdminServer) addBaseRoutes(router *gin.RouterGroup) {
+	v1 := router.Group("/api/v1")
 	{
-		// Gateway routes
 		gateways := v1.Group("/gateways")
 		{
 			gateways.POST("", s.CreateGateway)
@@ -104,6 +114,12 @@ func (s *AdminServer) setupRoutes() {
 			}
 		}
 	}
+}
+
+func (s *AdminServer) setupRoutes() {
+	// Create the base router group and add routes to it
+	baseRouter := s.router.Group("")
+	s.AddRoutes(baseRouter)
 }
 
 func (s *AdminServer) Run() error {
@@ -138,7 +154,6 @@ func (s *AdminServer) CreateGateway(c *gin.Context) {
 
 	s.logger.WithFields(logrus.Fields{
 		"gateway":          gateway,
-		"enabled_plugins":  gateway.EnabledPlugins,
 		"required_plugins": gateway.RequiredPlugins,
 	}).Info("Creating gateway - received request")
 
@@ -149,37 +164,11 @@ func (s *AdminServer) CreateGateway(c *gin.Context) {
 	}
 
 	// Validate required plugins
+	manager := plugins.GetManager()
 	for _, plugin := range gateway.RequiredPlugins {
-		validator, err := s.pluginFactory.GetValidator(plugin.Name)
-		if err != nil {
+		if err := manager.ValidatePlugin(plugin.Name, plugin); err != nil {
 			s.logger.WithError(err).WithField("plugin", plugin.Name).Error("Invalid plugin configuration")
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
-			return
-		}
-		if err := validator.ValidateConfig(plugin); err != nil {
-			s.logger.WithError(err).WithField("plugin", plugin.Name).Error("Invalid plugin configuration")
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
-			return
-		}
-	}
-
-	// Validate that all required plugins are also enabled
-	for _, plugin := range gateway.RequiredPlugins {
-		found := false
-		for _, enabled := range gateway.EnabledPlugins {
-			if enabled == plugin.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			s.logger.WithFields(logrus.Fields{
-				"plugin":          plugin.Name,
-				"enabled_plugins": gateway.EnabledPlugins,
-			}).Error("Plugin required but not enabled")
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": fmt.Sprintf("Plugin %s is required but not enabled. Required plugins must be in the enabled plugins list.", plugin.Name),
-			})
 			return
 		}
 	}
@@ -390,12 +379,7 @@ func (s *AdminServer) updateGateway(c *gin.Context) {
 	if req.Status != nil {
 		dbGateway.Status = *req.Status
 	}
-	if req.Tier != nil {
-		dbGateway.Tier = *req.Tier
-	}
-	if req.EnabledPlugins != nil {
-		dbGateway.EnabledPlugins = pq.StringArray(req.EnabledPlugins)
-	}
+
 	if req.RequiredPlugins != nil {
 		// Initialize plugins map
 		if dbGateway.RequiredPlugins == nil {
@@ -403,19 +387,13 @@ func (s *AdminServer) updateGateway(c *gin.Context) {
 		}
 
 		// Convert and validate plugins
+		manager := plugins.GetManager()
 		for _, config := range req.RequiredPlugins {
-			validator, err := s.pluginFactory.GetValidator(config.Name)
-			if err != nil {
+			if err := manager.ValidatePlugin(config.Name, config); err != nil {
 				s.logger.WithError(err).WithField("plugin", config.Name).Error("Invalid plugin configuration")
 				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
 				return
 			}
-			if err := validator.ValidateConfig(config); err != nil {
-				s.logger.WithError(err).WithField("plugin", config.Name).Error("Invalid plugin configuration")
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid plugin configuration: %v", err)})
-				return
-			}
-			dbGateway.RequiredPlugins = append(dbGateway.RequiredPlugins, config)
 		}
 	}
 
@@ -440,10 +418,8 @@ func (s *AdminServer) updateGateway(c *gin.Context) {
 		Name:            dbGateway.Name,
 		Subdomain:       dbGateway.Subdomain,
 		Status:          dbGateway.Status,
-		Tier:            dbGateway.Tier,
 		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
-		EnabledPlugins:  dbGateway.EnabledPlugins,
 		RequiredPlugins: apiGateway.RequiredPlugins,
 	}
 
@@ -521,7 +497,7 @@ func (s *AdminServer) createAPIKey(c *gin.Context) {
 		Name:      req.Name,
 		Key:       generateAPIKey(),
 		Active:    true,
-		ExpiresAt: req.ExpiresAt,
+		ExpiresAt: *req.ExpiresAt,
 	}
 
 	if err := s.repo.CreateAPIKey(c, apiKey); err != nil {
@@ -720,8 +696,6 @@ func (s *AdminServer) convertDBGatewayToAPI(dbGateway *models.Gateway) (*types.G
 		Name:            dbGateway.Name,
 		Subdomain:       dbGateway.Subdomain,
 		Status:          dbGateway.Status,
-		Tier:            dbGateway.Tier,
-		EnabledPlugins:  dbGateway.EnabledPlugins,
 		RequiredPlugins: dbGateway.RequiredPlugins,
 		CreatedAt:       dbGateway.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:       dbGateway.UpdatedAt.Format(time.RFC3339),
@@ -1283,11 +1257,9 @@ func (s *AdminServer) validatePlugin(plugin types.PluginConfig) error {
 	}
 
 	// Get plugin validator
-	validator, err := s.pluginFactory.GetValidator(plugin.Name)
-	if err != nil {
+	manager := plugins.GetManager()
+	if err := manager.ValidatePlugin(plugin.Name, plugin); err != nil {
 		return fmt.Errorf("unknown plugin: %s", plugin.Name)
 	}
-
-	// Use plugin-specific validation
-	return validator.ValidateConfig(plugin)
+	return nil
 }
