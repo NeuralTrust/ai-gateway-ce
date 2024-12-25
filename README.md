@@ -425,3 +425,174 @@ Example plugin configuration:
     }
 }
 ```
+
+## Gateway Types and Configuration
+
+The gateway supports two main types of configurations: `models` and `backends`.
+
+### Models Gateway
+
+Used for AI model providers like OpenAI and Anthropic. Automatically configures routing rules and handles authentication.
+
+```json
+{
+  "name": "ai-models-gateway",
+  "type": "models",
+  "subdomain": "ai",
+  "settings": {
+    "traffic": [
+      {"provider": "openai", "weight": 80},
+      {"provider": "anthropic", "weight": 20}
+    ],
+    "providers": [{
+      "name": "openai",
+      "credentials": {
+        "header_name": "Authorization",
+        "header_value": "Bearer sk-..."
+      },
+      "fallback_provider": "anthropic",
+      "fallback_credentials": {
+        "header_name": "X-API-Key",
+        "header_value": "sk-..."
+      },
+      "plugin_chain": ["rate-limiter", "logger"]
+    }, {
+      "name": "anthropic",
+      "credentials": {
+        "header_name": "X-API-Key",
+        "header_value": "sk-..."
+      }
+    }]
+  }
+}
+```
+
+#### Traffic Distribution
+- Configure multiple providers with weighted traffic distribution
+- Weights must sum to 100
+- Useful for cost optimization and reliability
+
+#### Provider Configuration
+- `name` - Provider identifier (e.g., "openai", "anthropic")
+- `fallback_provider` - Backup provider if primary fails
+- `plugin_chain` - Array of plugins to apply to this provider
+
+### Backends Gateway
+
+Used for routing to backend services with custom rules.
+
+```json
+{
+  "name": "backend-gateway",
+  "type": "backends",
+  "subdomain": "api",
+  "settings": {
+    "forwarding_rules": [{
+      "path": "/api/**",
+      "targets": [{"url": "http://backend:8080"}],
+      "methods": ["GET", "POST"],
+      "strip_path": false,
+      "preserve_host": false,
+      "active": true
+    }]
+  }
+}
+```
+
+### Authentication Options
+
+#### Header-based Authentication
+- `header_name` - Name of the authorization header (e.g., "Authorization", "X-API-Key")
+- `header_value` - Value of the authorization header (e.g., "Bearer sk-...")
+
+#### Parameter-based Authentication
+- `param_name` - Name of the authentication parameter
+- `param_value` - Value of the authentication parameter
+- `param_location` - Location of the parameter ("query" or "body")
+
+#### Azure Authentication
+- `azure_use_managed_identity` - Use Azure Managed Identity (default: false)
+- `azure_client_id` - Azure Client ID for user-assigned identity
+- `azure_client_secret` - Azure Client Secret for user-assigned identity
+- `azure_tenant_id` - Azure Tenant ID for user-assigned identity
+
+#### GCP Authentication
+- `gcp_use_service_account` - Use GCP Service Account (default: false)
+- `gcp_service_account_json` - GCP Service Account JSON credentials
+
+#### AWS Authentication
+- `aws_access_key_id` - AWS Access Key ID for static credentials
+- `aws_secret_access_key` - AWS Secret Access Key for static credentials
+
+#### General Settings
+- `allow_override` - Allow credentials to be overridden in requests (default: false)
+
+### Automatic Rule Generation
+
+For `models` type gateways, the following rules are automatically generated:
+
+#### OpenAI
+- `/v1/chat/completions` - Chat completions API
+- `/v1/completions` - Completions API
+- `/v1/embeddings` - Embeddings API
+
+#### Anthropic
+- `/v1/complete` - Complete API
+- `/v1/messages` - Messages API
+
+### Plugin Support
+
+Both gateway types support plugins through the `plugin_chain` configuration:
+- Rate limiting
+- Logging
+- Authentication
+- Custom plugins can be added through the plugin interface
+
+### Fallback Configuration
+
+The gateway supports fallback targets for both gateway types:
+
+#### Models Gateway Fallback
+```json
+{
+  "settings": {
+    "providers": [{
+      "name": "openai",
+      "credentials": {
+        "header_name": "Authorization",
+        "header_value": "Bearer sk-..."
+      },
+      "fallback_provider": "anthropic",
+      "fallback_credentials": {
+        "header_name": "X-API-Key",
+        "header_value": "sk-..."
+      }
+    }]
+  }
+}
+```
+
+#### Backends Gateway Fallback
+```json
+{
+  "settings": {
+    "forwarding_rules": [{
+      "path": "/api/**",
+      "targets": [
+        {"url": "http://primary:8080"}
+      ],
+      "fallback_targets": [
+        {"url": "http://backup:8080"}
+      ],
+      "retry_attempts": 3
+    }]
+  }
+}
+```
+
+#### Fallback Behavior
+- Primary targets are tried first
+- If primary fails after retry_attempts, fallback targets are used
+- Fallback targets follow the same retry policy
+- Headers and authentication are preserved for fallback requests
+- Supports weighted distribution for fallback targets

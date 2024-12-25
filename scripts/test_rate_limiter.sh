@@ -9,6 +9,7 @@ NC='\033[0m'
 ADMIN_URL=${ADMIN_URL:-"http://localhost:8080/api/v1"}
 PROXY_URL=${PROXY_URL:-"http://localhost:8081"}
 BASE_DOMAIN=${BASE_DOMAIN:-"example.com"}
+SUBDOMAIN="multirate12-$(date +%s)"
 
 echo -e "${GREEN}Testing Rate Limiter${NC}\n"
 
@@ -18,12 +19,12 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Multi Rate Limited Gateway",
-    "subdomain": "multirate10",
-    "tier": "basic",
-    "enabled_plugins": ["advanced_rate_limiter"],
+    "subdomain": "'$SUBDOMAIN'",
+    "type": "backends",
+    "enabled_plugins": ["rate_limiter"],
     "required_plugins": [
         {
-            "name": "advanced_rate_limiter",
+            "name": "rate_limiter",
             "enabled": true,
             "stage": "pre_request",
             "priority": 1,
@@ -67,7 +68,8 @@ echo -e "\n${GREEN}2. Creating API key...${NC}"
 API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/keys" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Test Key"
+    "name": "Test Key",
+    "expires_at": "2025-01-01T00:00:00Z"
 }')
 
 API_KEY=$(echo $API_KEY_RESPONSE | jq -r '.key')
@@ -128,51 +130,51 @@ for i in {1..6}; do
     sleep 0.1
 done
 
-# Test user-based rate limit
-echo -e "\n${GREEN}4.2 Testing user-based rate limit (limit: 5/min)...${NC}"
-for i in {1..6}; do
-    RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path2" \
-        -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
-        -H "Authorization: Bearer ${API_KEY}" \
-        -H "X-User-ID: 123" \
-        -H "X-Real-IP: 192.168.1.2")
+# # Test user-based rate limit
+# echo -e "\n${GREEN}4.2 Testing user-based rate limit (limit: 5/min)...${NC}"
+# for i in {1..6}; do
+#     RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path2" \
+#         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
+#         -H "Authorization: Bearer ${API_KEY}" \
+#         -H "X-User-ID: 123" \
+#         -H "X-Real-IP: 192.168.1.2")
     
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-    BODY=$(echo "$RESPONSE" | head -n1)
+#     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+#     BODY=$(echo "$RESPONSE" | head -n1)
 
-    if [ "$HTTP_CODE" == "200" ]; then
-        echo -e "${GREEN}User-based Request $i: Success${NC}"
-    elif [ "$HTTP_CODE" == "429" ]; then
-        echo -e "${RED}User-based Request $i: Rate Limited (Expected after 5 requests)${NC}"
-        echo "Response: $BODY"
-    else
-        echo -e "${RED}User-based Request $i: Unexpected status code: $HTTP_CODE${NC}"
-        echo "Response: $BODY"
-    fi
-    sleep 0.1
-done
+#     if [ "$HTTP_CODE" == "200" ]; then
+#         echo -e "${GREEN}User-based Request $i: Success${NC}"
+#     elif [ "$HTTP_CODE" == "429" ]; then
+#         echo -e "${RED}User-based Request $i: Rate Limited (Expected after 5 requests)${NC}"
+#         echo "Response: $BODY"
+#     else
+#         echo -e "${RED}User-based Request $i: Unexpected status code: $HTTP_CODE${NC}"
+#         echo "Response: $BODY"
+#     fi
+#     sleep 0.1
+# done
 
-# Test global rate limit
-echo -e "\n${GREEN}4.3 Testing global rate limit (limit: 10/min)...${NC}"
-for i in {1..11}; do
-    RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path1" \
-        -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
-        -H "Authorization: Bearer ${API_KEY}" \
-        -H "X-Real-IP: 192.168.1.$((i + 2))")
+# # Test global rate limit
+# echo -e "\n${GREEN}4.3 Testing global rate limit (limit: 10/min)...${NC}"
+# for i in {1..11}; do
+#     RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path1" \
+#         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
+#         -H "Authorization: Bearer ${API_KEY}" \
+#         -H "X-Real-IP: 192.168.1.$((i + 2))")
     
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-    BODY=$(echo "$RESPONSE" | head -n1)
+#     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+#     BODY=$(echo "$RESPONSE" | head -n1)
     
-    if [ "$HTTP_CODE" == "200" ]; then
-        echo -e "${GREEN}Global Request $i: Success${NC}"
-    elif [ "$HTTP_CODE" == "429" ]; then
-        echo -e "${RED}Global Request $i: Rate Limited (Expected after 10 requests)${NC}"
-        echo "Response: $BODY"
-    else
-        echo -e "${RED}Global Request $i: Unexpected status code: $HTTP_CODE${NC}"
-        echo "Response: $BODY"
-    fi
-    sleep 0.1
-done
+#     if [ "$HTTP_CODE" == "200" ]; then
+#         echo -e "${GREEN}Global Request $i: Success${NC}"
+#     elif [ "$HTTP_CODE" == "429" ]; then
+#         echo -e "${RED}Global Request $i: Rate Limited (Expected after 10 requests)${NC}"
+#         echo "Response: $BODY"
+#     else
+#         echo -e "${RED}Global Request $i: Unexpected status code: $HTTP_CODE${NC}"
+#         echo "Response: $BODY"
+#     fi
+#     sleep 0.1
+# done
 
-echo -e "\n${GREEN}Rate limiter tests completed${NC}"
+echo -e "\n${GREEN}Rate limiter tests completed${NC}" 

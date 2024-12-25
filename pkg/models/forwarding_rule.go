@@ -4,24 +4,71 @@ import (
 	"ai-gateway-ce/pkg/types"
 	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
+// CredentialsJSON implements SQL/JSON conversion for *types.Credentials
+type CredentialsJSON types.Credentials
+
+// Value implements the driver.Valuer interface
+func (c *CredentialsJSON) Value() (driver.Value, error) {
+	if c == nil {
+		return nil, nil
+	}
+	return json.Marshal(c)
+}
+
+// Scan implements the sql.Scanner interface
+func (c *CredentialsJSON) Scan(value interface{}) error {
+	if value == nil {
+		*c = CredentialsJSON{}
+		return nil
+	}
+
+	bytes, ok := value.([]byte)
+	if !ok {
+		return fmt.Errorf("expected []byte, got %T", value)
+	}
+	return json.Unmarshal(bytes, c)
+}
+
+// ToCredentials converts CredentialsJSON to *types.Credentials
+func (c *CredentialsJSON) ToCredentials() *types.Credentials {
+	if c == nil {
+		return nil
+	}
+	creds := types.Credentials(*c)
+	return &creds
+}
+
+// FromCredentials converts *types.Credentials to *CredentialsJSON
+func FromCredentials(c *types.Credentials) *CredentialsJSON {
+	if c == nil {
+		return nil
+	}
+	creds := CredentialsJSON(*c)
+	return &creds
+}
+
 type ForwardingRule struct {
-	ID            string          `json:"id"`
-	GatewayID     string          `json:"gateway_id"`
-	Path          string          `json:"path"`
-	Targets       TargetsJSON     `json:"targets" gorm:"type:jsonb"`
-	Methods       MethodsJSON     `json:"methods" gorm:"type:jsonb"`
-	Headers       HeadersJSON     `json:"headers" gorm:"type:jsonb"`
-	StripPath     bool            `json:"strip_path"`
-	PreserveHost  bool            `json:"preserve_host"`
-	RetryAttempts int             `json:"retry_attempts"`
-	PluginChain   PluginChainJSON `json:"plugin_chain" gorm:"type:jsonb"`
-	Active        bool            `json:"active"`
-	Public        bool            `json:"public"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	ID                  string           `json:"id" gorm:"primaryKey"`
+	GatewayID           string           `json:"gateway_id"`
+	Path                string           `json:"path"`
+	Targets             TargetsJSON      `json:"targets" gorm:"type:jsonb"`
+	FallbackTargets     TargetsJSON      `json:"fallback_targets,omitempty" gorm:"type:jsonb"`
+	Methods             MethodsJSON      `json:"methods" gorm:"type:jsonb"`
+	Headers             HeadersJSON      `json:"headers" gorm:"type:jsonb"`
+	StripPath           bool             `json:"strip_path"`
+	PreserveHost        bool             `json:"preserve_host"`
+	RetryAttempts       int              `json:"retry_attempts"`
+	PluginChain         PluginChainJSON  `json:"plugin_chain" gorm:"type:jsonb"`
+	Active              bool             `json:"active"`
+	Public              bool             `json:"public"`
+	CreatedAt           time.Time        `json:"created_at"`
+	UpdatedAt           time.Time        `json:"updated_at"`
+	Credentials         *CredentialsJSON `json:"credentials,omitempty" gorm:"type:jsonb"`
+	FallbackCredentials *CredentialsJSON `json:"fallback_credentials,omitempty" gorm:"type:jsonb"`
 }
 
 // TargetsJSON implements SQL/JSON conversion for []types.ForwardingTarget

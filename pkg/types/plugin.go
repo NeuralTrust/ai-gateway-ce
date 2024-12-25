@@ -116,11 +116,6 @@ type RateLimiterActions struct {
 	RetryAfter string `json:"retry_after"`
 }
 
-type ForwardingTarget struct {
-	URL    string `json:"url"`
-	Weight int    `json:"weight,omitempty"` // percentage of traffic (0-100)
-}
-
 var (
 	pluginRegistry = make(map[string]Plugin)
 )

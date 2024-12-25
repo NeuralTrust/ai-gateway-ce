@@ -4,21 +4,70 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"log"
 	"time"
 
+	"ai-gateway-ce/pkg/config"
 	"ai-gateway-ce/pkg/types"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
-// PluginConfigSlice is a custom type for handling JSON serialization of []types.PluginConfig
-type PluginConfigSlice []types.PluginConfig
+// Credentials represents all possible authentication methods
+type Credentials struct {
+	// Header-based auth
+	HeaderName  string `json:"header_name,omitempty"`
+	HeaderValue string `json:"header_value,omitempty"`
+
+	// Parameter-based auth
+	ParamName     string `json:"param_name,omitempty"`
+	ParamValue    string `json:"param_value,omitempty"`
+	ParamLocation string `json:"param_location,omitempty"` // "query" or "body"
+
+	// Azure auth
+	AzureUseManagedIdentity bool   `json:"azure_use_managed_identity,omitempty"`
+	AzureClientID           string `json:"azure_client_id,omitempty"`
+	AzureClientSecret       string `json:"azure_client_secret,omitempty"`
+	AzureTenantID           string `json:"azure_tenant_id,omitempty"`
+
+	// GCP auth
+	GCPUseServiceAccount  bool   `json:"gcp_use_service_account,omitempty"`
+	GCPServiceAccountJSON string `json:"gcp_service_account_json,omitempty"`
+
+	// AWS auth
+	AWSAccessKeyID     string `json:"aws_access_key_id,omitempty"`
+	AWSSecretAccessKey string `json:"aws_secret_access_key,omitempty"`
+
+	// General settings
+	AllowOverride bool `json:"allow_override,omitempty"`
+}
+
+// GatewaySettings is a custom type for handling JSON serialization of gateway settings
+
+type GatewaySettings struct {
+	Traffic   []GatewayTraffic  `json:"traffic"`
+	Providers []GatewayProvider `json:"providers"`
+}
+
+type GatewayTraffic struct {
+	Provider string `json:"provider"`
+	Weight   int    `json:"weight"`
+}
+
+type GatewayProvider struct {
+	Name                string      `json:"name"`
+	Path                string      `json:"path"`
+	Credentials         Credentials `json:"credentials"`
+	FallbackProvider    string      `json:"fallback_provider,omitempty"`
+	FallbackCredentials Credentials `json:"fallback_credentials,omitempty"`
+	PluginChain         []string    `json:"plugin_chain,omitempty"`
+}
 
 // Scan implements the sql.Scanner interface
-func (p *PluginConfigSlice) Scan(value interface{}) error {
+func (s *GatewaySettings) Scan(value interface{}) error {
 	if value == nil {
-		*p = make([]types.PluginConfig, 0)
+		*s = GatewaySettings{}
 		return nil
 	}
 
@@ -27,25 +76,54 @@ func (p *PluginConfigSlice) Scan(value interface{}) error {
 		return fmt.Errorf("failed to unmarshal JSONB value: %v", value)
 	}
 
-	return json.Unmarshal(bytes, p)
+	return json.Unmarshal(bytes, s)
 }
 
 // Value implements the driver.Valuer interface
-func (p PluginConfigSlice) Value() (driver.Value, error) {
+func (s GatewaySettings) Value() (driver.Value, error) {
+	return json.Marshal(s)
+}
+
+// IsEmpty checks if GatewaySettings is empty
+func (s GatewaySettings) IsEmpty() bool {
+	return len(s.Traffic) == 0 && len(s.Providers) == 0
+}
+
+// PluginConfigJSON implements SQL/JSON conversion for []types.PluginConfig
+type PluginConfigJSON []types.PluginConfig
+
+// Value implements the driver.Valuer interface
+func (p PluginConfigJSON) Value() (driver.Value, error) {
 	if p == nil {
-		return json.Marshal([]types.PluginConfig{})
+		return nil, nil
 	}
 	return json.Marshal(p)
 }
 
+// Scan implements the sql.Scanner interface
+func (p *PluginConfigJSON) Scan(value interface{}) error {
+	if value == nil {
+		*p = nil
+		return nil
+	}
+	bytes, ok := value.([]byte)
+	if !ok {
+		return fmt.Errorf("expected []byte, got %T", value)
+	}
+	return json.Unmarshal(bytes, p)
+}
+
 type Gateway struct {
-	ID              string            `json:"id" gorm:"primaryKey"`
-	Name            string            `json:"name"`
-	Subdomain       string            `json:"subdomain" gorm:"uniqueIndex"`
-	Status          string            `json:"status"`
-	RequiredPlugins PluginConfigSlice `json:"required_plugins" gorm:"type:jsonb"`
-	CreatedAt       time.Time         `json:"created_at"`
-	UpdatedAt       time.Time         `json:"updated_at"`
+	ID              string           `json:"id" gorm:"primaryKey"`
+	Name            string           `json:"name"`
+	Subdomain       string           `json:"subdomain" gorm:"uniqueIndex"`
+	Type            string           `json:"type"`
+	Status          string           `json:"status"`
+	Settings        GatewaySettings  `json:"settings" gorm:"type:jsonb"`
+	ForwardingRules []ForwardingRule `json:"forwarding_rules" gorm:"foreignKey:GatewayID"`
+	RequiredPlugins PluginConfigJSON `json:"required_plugins" gorm:"type:jsonb"`
+	CreatedAt       time.Time        `json:"created_at"`
+	UpdatedAt       time.Time        `json:"updated_at"`
 }
 
 // TableName specifies the table name for GORM
@@ -53,15 +131,68 @@ func (Gateway) TableName() string {
 	return "gateways"
 }
 
-// BeforeCreate hook to ensure ID is set and plugins are properly initialized
+// BeforeCreate hook to ensure ID is set and fields are properly initialized
 func (g *Gateway) BeforeCreate(tx *gorm.DB) error {
+	// Validate required fields
+	if g.Type == "" {
+		return fmt.Errorf("gateway type is required")
+	}
+	if g.Name == "" {
+		return fmt.Errorf("gateway name is required")
+	}
+	if g.Subdomain == "" {
+		return fmt.Errorf("gateway subdomain is required")
+	}
+
+	// Generate ID if not set
 	if g.ID == "" {
 		g.ID = uuid.New().String()
+	}
+
+	// Initialize Settings if empty
+	if g.Settings.IsEmpty() {
+		g.Settings = GatewaySettings{}
 	}
 
 	// Initialize RequiredPlugins if nil
 	if g.RequiredPlugins == nil {
 		g.RequiredPlugins = []types.PluginConfig{}
+	}
+
+	// Generate forwarding rules for models type
+	if g.Type == "models" {
+		g.generateProviderRules()
+
+		// Get the cacher from the context
+		if cacher, ok := tx.Statement.Context.Value("cacher").(types.RulesCacher); ok {
+			// Convert models.ForwardingRule to types.ForwardingRule
+			apiRules := make([]types.ForwardingRule, len(g.ForwardingRules))
+			for i, rule := range g.ForwardingRules {
+				apiRules[i] = types.ForwardingRule{
+					ID:                  rule.ID,
+					GatewayID:           rule.GatewayID,
+					Path:                rule.Path,
+					Targets:             rule.Targets,
+					Credentials:         rule.Credentials.ToCredentials(),
+					FallbackCredentials: rule.FallbackCredentials.ToCredentials(),
+					FallbackTargets:     rule.FallbackTargets,
+					Methods:             rule.Methods,
+					Headers:             rule.Headers,
+					StripPath:           rule.StripPath,
+					PreserveHost:        rule.PreserveHost,
+					RetryAttempts:       rule.RetryAttempts,
+					PluginChain:         rule.PluginChain,
+					Active:              rule.Active,
+					Public:              rule.Public,
+					CreatedAt:           rule.CreatedAt.Format(time.RFC3339),
+					UpdatedAt:           rule.UpdatedAt.Format(time.RFC3339),
+				}
+			}
+			if err := cacher.UpdateRulesCache(tx.Statement.Context, g.ID, apiRules); err != nil {
+				log.Printf("Failed to cache rules: %v", err)
+				// Continue anyway as rules are saved in DB
+			}
+		}
 	}
 
 	// Generate IDs for plugins if needed
@@ -80,6 +211,11 @@ func (g *Gateway) BeforeUpdate(tx *gorm.DB) error {
 
 	if g.RequiredPlugins == nil {
 		g.RequiredPlugins = []types.PluginConfig{}
+	}
+
+	// Regenerate forwarding rules for models type
+	if g.Type == "models" {
+		g.generateProviderRules()
 	}
 
 	// Generate IDs for any new plugins
@@ -120,4 +256,82 @@ func (g *Gateway) String() string {
 	}
 	bytes, _ := json.Marshal(g.RequiredPlugins)
 	return string(bytes)
+}
+
+func (g *Gateway) generateProviderRules() {
+	if g.Type != "models" {
+		return
+	}
+
+	providerConfig, err := config.LoadProviderConfig()
+	if err != nil {
+		log.Printf("Failed to load provider config: %v", err)
+		return
+	}
+
+	var rules []ForwardingRule
+	now := time.Now()
+
+	// Generate rules for each provider in settings
+	for _, provider := range g.Settings.Providers {
+		// Get provider configuration for endpoint paths
+		pConfig, ok := providerConfig.Providers[provider.Name]
+		if !ok {
+			continue
+		}
+
+		targetURL := pConfig.BaseURL
+
+		// Find fallback provider if configured
+		var fallbackProvider *GatewayProvider
+		if provider.FallbackProvider != "" {
+			for _, p := range g.Settings.Providers {
+				if p.Name == provider.FallbackProvider {
+					fallbackProvider = &p
+					break
+				}
+			}
+		}
+
+		// Generate rules for each endpoint
+		for _, path := range pConfig.Endpoints {
+			var fallbackTargets TargetsJSON
+			var fallbackCreds *types.Credentials
+
+			if fallbackProvider != nil {
+				// Get fallback provider config
+				fallbackConfig, ok := providerConfig.Providers[fallbackProvider.Name]
+				if ok {
+					// Always use base URL from provider config for fallback
+					fallbackTargets = TargetsJSON{{URL: fallbackConfig.BaseURL}}
+					fallbackCreds = (*types.Credentials)(&fallbackProvider.Credentials)
+				}
+			}
+
+			rules = append(rules, ForwardingRule{
+				ID:                  uuid.New().String(),
+				GatewayID:           g.ID,
+				Path:                provider.Path,
+				Targets:             TargetsJSON{{URL: targetURL}},
+				FallbackTargets:     fallbackTargets,
+				Methods:             MethodsJSON{"POST"},
+				Headers:             HeadersJSON{},
+				StripPath:           provider.Path != "",
+				PreserveHost:        false,
+				RetryAttempts:       3,
+				PluginChain:         PluginChainJSON{},
+				Active:              true,
+				Public:              false,
+				CreatedAt:           now,
+				UpdatedAt:           now,
+				Credentials:         (*CredentialsJSON)(&provider.Credentials),
+				FallbackCredentials: (*CredentialsJSON)(fallbackCreds),
+			})
+
+			log.Printf("Generated rule for %s: Path=%s, Target=%s, Fallback=%v",
+				provider.Name, path, targetURL, fallbackTargets)
+		}
+	}
+
+	g.ForwardingRules = rules
 }

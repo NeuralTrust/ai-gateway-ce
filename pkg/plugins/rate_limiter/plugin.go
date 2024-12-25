@@ -10,6 +10,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/mitchellh/mapstructure"
+	"github.com/sirupsen/logrus"
 
 	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/types"
@@ -123,7 +124,9 @@ func (r *RateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginConfig,
 	}
 
 	var finalStatus limitStatus
-
+	logrus.WithFields(logrus.Fields{
+		"config": config,
+	}).Info("Rate limiter config")
 	// Check limits in specific order: per_ip -> per_user -> global
 	limitOrder := []string{"per_ip", "per_user", "global"}
 

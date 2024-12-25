@@ -111,7 +111,13 @@ func main() {
 	case "admin":
 		srv = server.NewAdminServer(config, cacheInstance, repo, logger)
 	case "proxy":
-		srv = server.NewProxyServer(config, cacheInstance, repo, logger)
+		srv = server.NewProxyServer(
+			config,
+			cacheInstance,
+			repo,
+			logger,
+			false, // debug mode
+		)
 	default:
 		logger.Fatalf("Unknown server type: %s", serverType)
 	}

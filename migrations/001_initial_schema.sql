@@ -6,13 +6,11 @@ CREATE TABLE gateways (
     id UUID PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     subdomain VARCHAR(255) NOT NULL UNIQUE,
-    api_key VARCHAR(255) NOT NULL UNIQUE,
     status VARCHAR(50) NOT NULL,
-    tier VARCHAR(50) NOT NULL,
+    type VARCHAR(50) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
-    enabled_plugins JSONB NOT NULL DEFAULT '[]',
-    required_plugins JSONB NOT NULL DEFAULT '{}'
+    plugins_chain JSONB NOT NULL DEFAULT '[]',
 );
 
 -- Create forwarding_rules table
@@ -42,7 +40,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     gateway_id VARCHAR(255) NOT NULL,
     name VARCHAR(255) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Create indexes

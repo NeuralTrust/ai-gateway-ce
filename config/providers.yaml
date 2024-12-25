@@ -1,0 +1,13 @@
+providers:
+  openai:
+    base_url: "https://api.openai.com"
+    endpoints:
+      chat: "/v1/chat/completions"
+      completions: "/v1/completions"
+      embeddings: "/v1/embeddings"
+
+  anthropic:
+    base_url: "https://api.anthropic.com"
+    endpoints:  
+      chat: "/v1/messages"
+      completions: "/v1/complete"

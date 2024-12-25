@@ -2,8 +2,10 @@ package middleware
 
 import (
 	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/database"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
@@ -12,13 +14,15 @@ import (
 type GatewayMiddleware struct {
 	logger     *logrus.Logger
 	cache      *cache.Cache
+	repo       *database.Repository
 	baseDomain string
 }
 
-func NewGatewayMiddleware(logger *logrus.Logger, cache *cache.Cache, baseDomain string) *GatewayMiddleware {
+func NewGatewayMiddleware(logger *logrus.Logger, cache *cache.Cache, repo *database.Repository, baseDomain string) *GatewayMiddleware {
 	return &GatewayMiddleware{
 		logger:     logger,
 		cache:      cache,
+		repo:       repo,
 		baseDomain: baseDomain,
 	}
 }
@@ -63,18 +67,33 @@ func (m *GatewayMiddleware) IdentifyGateway() gin.HandlerFunc {
 			"path":      c.Request.URL.Path,
 		}).Debug("Extracted subdomain")
 
-		// Get gateway ID from subdomain mapping
+		// Try to get gateway ID from cache first
 		key := fmt.Sprintf("subdomain:%s", subdomain)
 		gatewayID, err := m.cache.Get(c, key)
 		if err != nil {
 			if err.Error() == "redis: nil" {
-				m.logger.WithFields(logrus.Fields{
-					"subdomain": subdomain,
-					"key":       key,
-					"host":      host,
-					"path":      c.Request.URL.Path,
-				}).Error("Gateway not found")
-				c.JSON(404, gin.H{"error": "Gateway not found"})
+				// If not in cache, try to get from database
+				gateway, err := m.repo.GetGatewayBySubdomain(c.Request.Context(), subdomain)
+				if err != nil {
+					m.logger.WithFields(logrus.Fields{
+						"subdomain": subdomain,
+						"key":       key,
+						"host":      host,
+						"path":      c.Request.URL.Path,
+						"error":     err.Error(),
+					}).Error("Gateway not found in database")
+					c.JSON(404, gin.H{"error": "Gateway not found"})
+					c.Abort()
+					return
+				}
+
+				// Cache the gateway ID for future requests
+				if err := m.cache.Set(c.Request.Context(), key, gateway.ID, 24*time.Hour); err != nil {
+					m.logger.WithError(err).Error("Failed to cache gateway ID")
+					// Continue anyway as we found the gateway
+				}
+
+				gatewayID = gateway.ID
 			} else {
 				m.logger.WithFields(logrus.Fields{
 					"error":     err.Error(),
@@ -83,9 +102,9 @@ func (m *GatewayMiddleware) IdentifyGateway() gin.HandlerFunc {
 					"host":      host,
 				}).Error("Failed to get gateway ID")
 				c.JSON(500, gin.H{"error": "Internal server error"})
+				c.Abort()
+				return
 			}
-			c.Abort()
-			return
 		}
 
 		m.logger.WithFields(logrus.Fields{
@@ -96,6 +115,7 @@ func (m *GatewayMiddleware) IdentifyGateway() gin.HandlerFunc {
 		}).Debug("Found gateway")
 
 		c.Set(GatewayContextKey, gatewayID)
+		c.Next()
 	}
 }
 

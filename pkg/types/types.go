@@ -8,20 +8,9 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// Request/Response types for API
-type CreateGatewayRequest struct {
-	Name            string                  `json:"name" binding:"required"`
-	Subdomain       string                  `json:"subdomain" binding:"required"`
-	Tier            string                  `json:"tier" binding:"required"`
-	EnabledPlugins  []string                `json:"enabled_plugins"`
-	RequiredPlugins map[string]PluginConfig `json:"required_plugins"`
-}
-
 type UpdateGatewayRequest struct {
 	Name            *string                 `json:"name,omitempty"`
 	Status          *string                 `json:"status,omitempty"`
-	Tier            *string                 `json:"tier,omitempty"`
-	EnabledPlugins  []string                `json:"enabled_plugins,omitempty"`
 	RequiredPlugins map[string]PluginConfig `json:"required_plugins,omitempty"`
 }
 
@@ -31,26 +20,32 @@ type CreateAPIKeyRequest struct {
 }
 
 type CreateRuleRequest struct {
-	Path          string             `json:"path" binding:"required"`
-	Targets       []ForwardingTarget `json:"targets" binding:"required"`
-	Methods       []string           `json:"methods"`
-	Headers       map[string]string  `json:"headers"`
-	StripPath     *bool              `json:"strip_path"`
-	PreserveHost  *bool              `json:"preserve_host"`
-	RetryAttempts *int               `json:"retry_attempts"`
-	PluginChain   []PluginConfig     `json:"plugin_chain"`
+	Path                string             `json:"path" binding:"required"`
+	Targets             []ForwardingTarget `json:"targets" binding:"required"`
+	Credentials         *Credentials       `json:"credentials"`
+	FallbackTargets     []ForwardingTarget `json:"fallback_targets,omitempty"`
+	FallbackCredentials *Credentials       `json:"fallback_credentials,omitempty"`
+	Methods             []string           `json:"methods"`
+	Headers             map[string]string  `json:"headers"`
+	StripPath           *bool              `json:"strip_path"`
+	PreserveHost        *bool              `json:"preserve_host"`
+	RetryAttempts       *int               `json:"retry_attempts"`
+	PluginChain         []PluginConfig     `json:"plugin_chain"`
 }
 
 type UpdateRuleRequest struct {
-	Path          string             `json:"path"`
-	Targets       []ForwardingTarget `json:"targets"`
-	Methods       []string           `json:"methods"`
-	Headers       map[string]string  `json:"headers"`
-	StripPath     *bool              `json:"strip_path"`
-	PreserveHost  *bool              `json:"preserve_host"`
-	RetryAttempts *int               `json:"retry_attempts"`
-	Active        *bool              `json:"active"`
-	PluginChain   []PluginConfig     `json:"plugin_chain"`
+	Path                string             `json:"path"`
+	Targets             []ForwardingTarget `json:"targets"`
+	Credentials         *Credentials       `json:"credentials"`
+	FallbackTargets     []ForwardingTarget `json:"fallback_targets"`
+	FallbackCredentials *Credentials       `json:"fallback_credentials"`
+	Methods             []string           `json:"methods"`
+	Headers             map[string]string  `json:"headers"`
+	StripPath           *bool              `json:"strip_path"`
+	PreserveHost        *bool              `json:"preserve_host"`
+	RetryAttempts       *int               `json:"retry_attempts"`
+	Active              *bool              `json:"active"`
+	PluginChain         []PluginConfig     `json:"plugin_chain"`
 }
 
 // EvaluateCondition evaluates a response condition against a value

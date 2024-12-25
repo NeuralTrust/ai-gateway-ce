@@ -79,10 +79,9 @@ func (r *Repository) IsValidAPIKeyFast(gatewayID, apiKey string) bool {
 
 // Gateway operations
 func (r *Repository) CreateGateway(ctx context.Context, gateway *models.Gateway) error {
-	if gateway.RequiredPlugins == nil {
-		gateway.RequiredPlugins = []types.PluginConfig{}
-	}
-	return r.db.Create(gateway).Error
+	// Add repository as cacher to context
+	ctx = context.WithValue(ctx, "cacher", r)
+	return r.db.WithContext(ctx).Create(gateway).Error
 }
 
 func (r *Repository) GetGateway(ctx context.Context, id string) (*models.Gateway, error) {
@@ -134,14 +133,30 @@ func (r *Repository) UpdateGateway(ctx context.Context, gateway *models.Gateway)
 	return r.db.Save(gateway).Error
 }
 
-func (r *Repository) DeleteGateway(ctx context.Context, id string) error {
-	result := r.db.Delete(&models.Gateway{}, "id = ?", id)
-	if result.Error != nil {
-		return result.Error
+func (r *Repository) DeleteGateway(id string) error {
+	// Start a transaction
+	tx := r.db.Begin()
+	if tx.Error != nil {
+		return tx.Error
 	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("gateway not found")
+
+	// Delete associated forwarding rules first
+	if err := tx.Where("gateway_id = ?", id).Delete(&models.ForwardingRule{}).Error; err != nil {
+		tx.Rollback()
+		return err
 	}
+
+	// Then delete the gateway
+	if err := tx.Delete(&models.Gateway{ID: id}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	// Commit the transaction and check for errors
+	if err := tx.Commit().Error; err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -160,9 +175,30 @@ func (r *Repository) GetRule(ctx context.Context, id string, gatewayID string) (
 }
 
 func (r *Repository) ListRules(ctx context.Context, gatewayID string) ([]models.ForwardingRule, error) {
+	// Try cache first
+	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
+	rulesJSON, err := r.cache.Get(ctx, rulesKey)
+	if err == nil {
+		var rules []models.ForwardingRule
+		if err := json.Unmarshal([]byte(rulesJSON), &rules); err == nil {
+			return rules, nil
+		}
+		// If unmarshal fails, continue to database
+	}
+
+	// Get from database
 	var rules []models.ForwardingRule
-	err := r.db.Where("gateway_id = ?", gatewayID).Find(&rules).Error
-	return rules, err
+	err = r.db.Where("gateway_id = ?", gatewayID).Find(&rules).Error
+	if err != nil {
+		return nil, err
+	}
+
+	// Update cache
+	if err := r.UpdateRulesCache(ctx, gatewayID, rules); err != nil {
+		r.logger.WithError(err).Warn("Failed to update rules cache")
+	}
+
+	return rules, nil
 }
 
 func (r *Repository) UpdateRule(ctx context.Context, rule *models.ForwardingRule) error {
@@ -285,4 +321,42 @@ func (r *Repository) ValidateAPIKey(ctx context.Context, gatewayID string, apiKe
 	}
 
 	return exists > 0, nil
+}
+
+// UpdateRulesCache updates the rules cache for a gateway
+func (r *Repository) UpdateRulesCache(ctx context.Context, gatewayID string, rules []models.ForwardingRule) error {
+	// Convert to API response format
+	apiRules := make([]types.ForwardingRule, len(rules))
+	for i, rule := range rules {
+		apiRules[i] = types.ForwardingRule{
+			ID:            rule.ID,
+			GatewayID:     rule.GatewayID,
+			Path:          rule.Path,
+			Targets:       rule.Targets,
+			Methods:       rule.Methods,
+			Headers:       rule.Headers,
+			StripPath:     rule.StripPath,
+			PreserveHost:  rule.PreserveHost,
+			RetryAttempts: rule.RetryAttempts,
+			PluginChain:   rule.PluginChain,
+			Active:        rule.Active,
+			Public:        rule.Public,
+			CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
+		}
+	}
+
+	// Marshal rules to JSON
+	rulesJSON, err := json.Marshal(apiRules)
+	if err != nil {
+		return fmt.Errorf("failed to marshal rules: %w", err)
+	}
+
+	// Store in cache
+	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
+	if err := r.cache.Set(ctx, rulesKey, string(rulesJSON), 0); err != nil {
+		return fmt.Errorf("failed to cache rules: %w", err)
+	}
+
+	return nil
 }
