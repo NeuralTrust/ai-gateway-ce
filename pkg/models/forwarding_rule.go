@@ -53,22 +53,22 @@ func FromCredentials(c *types.Credentials) *CredentialsJSON {
 
 // ForwardingRule represents a forwarding rule in the database
 type ForwardingRule struct {
-	ID                    string            `gorm:"primaryKey"`
-	GatewayID             string            `gorm:"not null"`
-	Path                  string            `gorm:"not null"`
-	Targets               TargetsJSON       `gorm:"type:jsonb;not null"`
-	Credentials           *CredentialsJSON  `json:"credentials" gorm:"type:jsonb"`
-	FallbackTargets       TargetsJSON       `json:"fallback_targets" gorm:"type:jsonb"`
-	FallbackProvider      string            `json:"fallback_provider,omitempty"`
-	FallbackCredentials   *CredentialsJSON  `json:"fallback_credentials" gorm:"type:jsonb"`
-	Methods               MethodsJSON       `gorm:"type:jsonb"`
-	Headers               map[string]string `gorm:"type:jsonb"`
-	StripPath             bool              `gorm:"default:false"`
-	PreserveHost          bool              `gorm:"default:false"`
-	RetryAttempts         int               `gorm:"default:0"`
-	PluginChain           PluginChainJSON   `gorm:"type:jsonb"`
-	Active                bool              `gorm:"default:true"`
-	Public                bool              `gorm:"default:false"`
+	ID                    string           `gorm:"primaryKey"`
+	GatewayID             string           `gorm:"not null"`
+	Path                  string           `gorm:"not null"`
+	Targets               TargetsJSON      `gorm:"type:jsonb;not null"`
+	Credentials           *CredentialsJSON `json:"credentials" gorm:"type:jsonb"`
+	FallbackTargets       TargetsJSON      `json:"fallback_targets" gorm:"type:jsonb"`
+	FallbackProvider      string           `json:"fallback_provider,omitempty"`
+	FallbackCredentials   *CredentialsJSON `json:"fallback_credentials" gorm:"type:jsonb"`
+	Methods               MethodsJSON      `gorm:"type:jsonb"`
+	Headers               HeadersJSON      `gorm:"type:jsonb"`
+	StripPath             bool             `gorm:"default:false"`
+	PreserveHost          bool             `gorm:"default:false"`
+	RetryAttempts         int              `gorm:"default:0"`
+	PluginChain           PluginChainJSON  `gorm:"type:jsonb"`
+	Active                bool             `gorm:"default:true"`
+	Public                bool             `gorm:"default:false"`
 	CreatedAt             time.Time
 	UpdatedAt             time.Time
 	LoadBalancingStrategy string `gorm:"default:'round_robin'"`
@@ -166,11 +166,12 @@ func (h *HeadersJSON) Scan(value interface{}) error {
 		*h = nil
 		return nil
 	}
+
 	bytes, ok := value.([]byte)
 	if !ok {
-		return json.Unmarshal([]byte(value.(string)), &h)
+		return fmt.Errorf("expected []byte, got %T", value)
 	}
-	return json.Unmarshal(bytes, &h)
+	return json.Unmarshal(bytes, h)
 }
 
 // TableName specifies the table name for GORM

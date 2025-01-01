@@ -549,8 +549,9 @@ func (s *ProxyServer) cacheGatewayData(ctx context.Context, gatewayID string, ga
 		return fmt.Errorf("failed to cache gateway: %w", err)
 	}
 
-	// Cache rules
-	rulesJSON, err := json.Marshal(rules)
+	// Convert and cache rules as types
+	typesRules := convertModelToTypesRules(rules)
+	rulesJSON, err := json.Marshal(typesRules)
 	if err != nil {
 		return fmt.Errorf("failed to marshal rules: %w", err)
 	}
@@ -562,7 +563,7 @@ func (s *ProxyServer) cacheGatewayData(ctx context.Context, gatewayID string, ga
 	// Cache in memory
 	gatewayData := &types.GatewayData{
 		Gateway: convertModelToTypesGateway(gateway),
-		Rules:   convertModelToTypesRules(rules),
+		Rules:   typesRules,
 	}
 	s.gatewayCache.Set(gatewayID, gatewayData)
 
@@ -623,16 +624,6 @@ func convertModelToTypesSettings(s models.GatewaySettings) types.GatewaySettings
 func convertModelToTypesRules(rules []models.ForwardingRule) []types.ForwardingRule {
 	var result []types.ForwardingRule
 	for _, r := range rules {
-		// Convert pq.StringArray to map[string]string
-		headers := make(map[string]string)
-		for _, h := range r.Headers {
-			parts := strings.SplitN(h, ":", 2)
-			if len(parts) == 2 {
-				headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-			}
-		}
-
-		// The plugin chain is already []types.PluginConfig, no need for wrapper
 		result = append(result, types.ForwardingRule{
 			ID:                    r.ID,
 			GatewayID:             r.GatewayID,
@@ -642,7 +633,7 @@ func convertModelToTypesRules(rules []models.ForwardingRule) []types.ForwardingR
 			FallbackTargets:       r.FallbackTargets,
 			FallbackCredentials:   r.FallbackCredentials.ToCredentials(),
 			Methods:               r.Methods,
-			Headers:               headers,
+			Headers:               map[string]string(r.Headers),
 			StripPath:             r.StripPath,
 			PreserveHost:          r.PreserveHost,
 			RetryAttempts:         r.RetryAttempts,

@@ -96,7 +96,7 @@ API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/api/v1/gateways/$GATEWAY_ID/keys"
   -H "Content-Type: application/json" \
   -d '{
     "name": "test-key",
-    "expires_at": "2025-01-01T00:00:00Z"
+    "expires_at": "2026-01-01T00:00:00Z"
   }')
 
 API_KEY=$(echo $API_KEY_RESPONSE | jq -r '.key')
