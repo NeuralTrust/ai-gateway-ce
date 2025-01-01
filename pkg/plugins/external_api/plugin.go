@@ -16,6 +16,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	PluginName = "external_api"
+)
+
 type ExternalApiPlugin struct {
 	client *http.Client
 }
@@ -34,11 +38,15 @@ type Condition struct {
 }
 
 func (v *ExternalApiPlugin) Name() string {
-	return "external_api"
+	return PluginName
 }
 
 func (v *ExternalApiPlugin) Stages() []types.Stage {
-	return []types.Stage{types.PreRequest}
+	return []types.Stage{}
+}
+
+func (v *ExternalApiPlugin) AllowedStages() []types.Stage {
+	return []types.Stage{types.PreRequest, types.PostResponse}
 }
 
 func NewExternalApiPlugin() pluginiface.Plugin {

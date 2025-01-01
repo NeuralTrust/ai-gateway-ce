@@ -8,6 +8,17 @@ providers:
 
   anthropic:
     base_url: "https://api.anthropic.com"
-    endpoints:  
+    endpoints:
       chat: "/v1/messages"
-      completions: "/v1/complete"
+
+  mistral:
+    base_url: "https://api.mistral.ai"
+    endpoints:
+      chat: "/v1/chat/completions"
+      completions: "/v1/completions"
+
+  llama:
+    base_url: "https://api.llama.ai"
+    endpoints:
+      chat: "/v1/chat/completions"
+      completions: "/v1/completions"

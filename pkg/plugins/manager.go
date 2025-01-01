@@ -12,6 +12,7 @@ import (
 	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/plugins/external_api"
 	"ai-gateway-ce/pkg/plugins/rate_limiter"
+	"ai-gateway-ce/pkg/plugins/token_rate_limiter"
 	"ai-gateway-ce/pkg/types"
 )
 
@@ -51,6 +52,7 @@ func InitializePlugins(cache *cache.Cache, logger *logrus.Logger) {
 	// Register built-in plugins
 	manager.RegisterPlugin(rate_limiter.NewRateLimiterPlugin(cache.Client()))
 	manager.RegisterPlugin(external_api.NewExternalApiPlugin())
+	manager.RegisterPlugin(token_rate_limiter.NewTokenRateLimiterPlugin(logger, cache.Client()))
 }
 
 // ValidatePlugin validates a plugin configuration
@@ -106,17 +108,22 @@ func (m *Manager) ExecuteStage(ctx context.Context, stage types.Stage, gatewayID
 	plugins := m.plugins
 	m.mu.RUnlock()
 
+	// Set the current stage in the request context
+	req.Stage = stage
+
+	// Track executed plugins to prevent duplicates
+	executedPlugins := make(map[string]bool)
+
 	// Execute gateway-level chains first
 	if len(gatewayChains) > 0 {
-		if err := m.executeChains(ctx, plugins, gatewayChains, req, resp); err != nil {
+		if err := m.executeChains(ctx, plugins, gatewayChains, req, resp, executedPlugins); err != nil {
 			return resp, err
 		}
-
 	}
 
 	// Then execute rule-level chains
 	if len(ruleChains) > 0 {
-		if err := m.executeChains(ctx, plugins, ruleChains, req, resp); err != nil {
+		if err := m.executeChains(ctx, plugins, ruleChains, req, resp, executedPlugins); err != nil {
 			return resp, err
 		}
 	}
@@ -124,10 +131,16 @@ func (m *Manager) ExecuteStage(ctx context.Context, stage types.Stage, gatewayID
 	return resp, nil
 }
 
-func (m *Manager) executeChains(ctx context.Context, plugins map[string]pluginiface.Plugin, chains []types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) error {
+func (m *Manager) executeChains(ctx context.Context, plugins map[string]pluginiface.Plugin, chains []types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext, executedPlugins map[string]bool) error {
 	// Group parallel and sequential chains
 	var parallelChains, sequentialChains []types.PluginConfig
 	for _, chain := range chains {
+		// Skip if plugin was already executed in this stage
+		if executedPlugins[chain.Name] {
+			continue
+		}
+		executedPlugins[chain.Name] = true
+
 		if chain.Parallel {
 			parallelChains = append(parallelChains, chain)
 		} else {
@@ -269,6 +282,7 @@ func (m *Manager) executeSequential(ctx context.Context, plugins map[string]plug
 				return err
 			}
 			if pluginResp != nil {
+				m.mu.Lock()
 				resp.StatusCode = pluginResp.StatusCode
 				if pluginResp.Body != nil {
 					resp.Body = pluginResp.Body
@@ -283,6 +297,7 @@ func (m *Manager) executeSequential(ctx context.Context, plugins map[string]plug
 						resp.Metadata[k] = v
 					}
 				}
+				m.mu.Unlock()
 			}
 		}
 	}
@@ -294,8 +309,44 @@ func (m *Manager) getChains(level types.Level, entityID string, stage types.Stag
 		if chains, exists := configs[entityID]; exists {
 			var stageChains []types.PluginConfig
 			for _, chain := range chains {
-				if chain.Stage == stage {
-					stageChains = append(stageChains, chain)
+				// Get the plugin to check its stages
+				plugin, exists := m.plugins[chain.Name]
+				if !exists {
+					continue
+				}
+
+				// Check if plugin has fixed stages
+				fixedStages := plugin.Stages()
+				if len(fixedStages) > 0 {
+					// For plugins with fixed stages, check if the current stage is one of them
+					for _, fixedStage := range fixedStages {
+						if fixedStage == stage {
+							chainConfig := chain
+							chainConfig.Stage = stage
+							stageChains = append(stageChains, chainConfig)
+							break
+						}
+					}
+				} else {
+					// For plugins without fixed stages, validate against allowed stages
+					allowedStages := plugin.AllowedStages()
+					// If no stage is configured, skip this plugin
+					if chain.Stage == "" {
+						continue
+					}
+					// Check if the configured stage is allowed and matches current stage
+					if chain.Stage == stage {
+						isAllowed := false
+						for _, allowedStage := range allowedStages {
+							if allowedStage == stage {
+								isAllowed = true
+								break
+							}
+						}
+						if isAllowed {
+							stageChains = append(stageChains, chain)
+						}
+					}
 				}
 			}
 			return stageChains

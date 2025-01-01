@@ -23,24 +23,6 @@ const (
 	RuleLevel    Level = "rule"
 )
 
-// Plugin types
-const (
-	RateLimiterPlugin = "rate_limiter"
-	// Add other plugin types here
-)
-
-// Plugin defines the interface that all plugins must implement
-type Plugin interface {
-	// Name returns the unique identifier of the plugin
-	Name() string
-
-	// Stages returns the stages where this plugin should be executed
-	Stages() []Stage
-
-	// Execute runs the plugin logic
-	Execute(ctx context.Context, cfg PluginConfig, req *RequestContext, resp *ResponseContext) (*PluginResponse, error)
-}
-
 // PluginConfig represents the configuration for a plugin
 type PluginConfig struct {
 	ID       string                 `json:"id"` // ID of the gateway or rule this plugin belongs to
@@ -88,6 +70,7 @@ type RequestContext struct {
 	Query     url.Values
 	Body      []byte
 	Metadata  map[string]interface{}
+	Stage     Stage // Current execution stage
 }
 
 // ResponseContext represents the context for a response
@@ -114,19 +97,4 @@ type RateLimit struct {
 type RateLimiterActions struct {
 	Type       string `json:"type"`
 	RetryAfter string `json:"retry_after"`
-}
-
-var (
-	pluginRegistry = make(map[string]Plugin)
-)
-
-// RegisterPlugin registers a plugin with the registry
-func RegisterPlugin(name string, plugin Plugin) {
-	pluginRegistry[name] = plugin
-}
-
-// GetPlugin returns a plugin from the registry
-func GetPlugin(name string) (Plugin, bool) {
-	plugin, ok := pluginRegistry[name]
-	return plugin, ok
 }

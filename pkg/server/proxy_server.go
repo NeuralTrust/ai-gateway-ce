@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -35,6 +34,7 @@ type ProxyServer struct {
 	pluginCache   *common.TTLMap
 	skipAuthCheck bool
 	httpClient    *http.Client
+	loadBalancer  LoadBalancer
 }
 
 // Cache TTLs
@@ -68,6 +68,7 @@ func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Re
 		pluginCache:   pluginCache,
 		skipAuthCheck: skipAuthCheck,
 		httpClient:    &http.Client{},
+		loadBalancer:  NewLoadBalancer(cache, logger),
 	}
 
 	// Subscribe to gateway events
@@ -84,8 +85,11 @@ func (s *ProxyServer) Run() error {
 	// Set Gin to release mode
 	gin.SetMode(gin.ReleaseMode)
 
-	// Add middleware to handle system routes first
-	s.router.Use(func(c *gin.Context) {
+	// Create a new router group for all routes
+	baseGroup := s.router.Group("")
+
+	// Add system routes handler to the base group
+	baseGroup.Use(func(c *gin.Context) {
 		path := c.Request.URL.Path
 
 		// Handle system routes
@@ -109,34 +113,25 @@ func (s *ProxyServer) Run() error {
 		c.Next()
 	})
 
-	// Add middleware chain
-	s.router.Use(s.middlewareHandler())
+	// Create a new group for non-system routes
+	apiGroup := baseGroup.Group("")
 
-	// Add catch-all route for proxying
-	s.router.Any("/*path", s.HandleForward)
+	// Add gateway identification middleware and auth middleware to the API group
+	gatewayMiddleware := middleware.NewGatewayMiddleware(s.logger, s.cache, s.repo, s.config.Server.BaseDomain)
+	authMiddleware := middleware.NewAuthMiddleware(s.logger, s.repo)
+
+	apiGroup.Use(gatewayMiddleware.IdentifyGateway())
+	apiGroup.Use(func(c *gin.Context) {
+		if !s.skipAuthCheck && !isPublicRoute(c, s.cache) {
+			authMiddleware.ValidateAPIKey()(c)
+		}
+	})
+
+	// Add catch-all route for proxying to the API group
+	apiGroup.Any("/*path", s.HandleForward)
 
 	// Start the server
 	return s.router.Run(fmt.Sprintf(":%d", s.config.Server.ProxyPort))
-}
-
-// Combine middleware handling into a single function for better performance
-func (s *ProxyServer) middlewareHandler() gin.HandlerFunc {
-	identifyHandler := middleware.NewGatewayMiddleware(s.logger, s.cache, s.repo, s.config.Server.BaseDomain).IdentifyGateway()
-	validateHandler := middleware.NewAuthMiddleware(s.logger, s.repo).ValidateAPIKey()
-
-	return func(c *gin.Context) {
-		// Run gateway identification first
-		identifyHandler(c)
-		if c.IsAborted() {
-			return
-		}
-
-		// Then run auth middleware
-		validateHandler(c)
-		if c.IsAborted() {
-			return
-		}
-	}
 }
 
 func (s *ProxyServer) HandleForward(c *gin.Context) {
@@ -154,6 +149,21 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		return
 	}
 
+	// Get metadata from gin context
+	var metadata map[string]interface{}
+	if md, exists := c.Get("metadata"); exists {
+		if m, ok := md.(map[string]interface{}); ok {
+			metadata = m
+		}
+	}
+
+	if metadata == nil {
+		metadata = make(map[string]interface{})
+		if apiKey, exists := c.Get("api_key"); exists && apiKey != nil {
+			metadata["api_key"] = apiKey
+		}
+	}
+
 	// Create the RequestContext
 	reqCtx := &types.RequestContext{
 		Context:   ctx,
@@ -162,9 +172,8 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		Method:    method,
 		Path:      path,
 		Query:     c.Request.URL.Query(),
-		Metadata:  make(map[string]interface{}),
+		Metadata:  metadata,
 	}
-
 	// Read the request body
 	bodyData, err := io.ReadAll(c.Request.Body)
 	if err != nil {
@@ -194,18 +203,18 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 
 	// Get gateway data with plugins
 	gatewayData, err := s.getGatewayData(ctx, gatewayID.(string))
+	s.logger.WithFields(logrus.Fields{
+		"gatewayData": gatewayData,
+	}).Debug("Gateway data")
+	reqCtx.Metadata["gateway_data"] = gatewayData
+
 	if err != nil {
 		s.logger.WithError(err).Error("Failed to get gateway data")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-
-	s.logger.WithFields(logrus.Fields{
-		"gatewayData": gatewayData,
-	}).Debug("Gateway data")
-
 	// Find matching rule
-	var matchingRule *models.ForwardingRule
+	var matchingRule *types.ForwardingRule
 	for _, rule := range gatewayData.Rules {
 		s.logger.WithFields(logrus.Fields{
 			"rule": rule,
@@ -227,27 +236,28 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 			continue
 		}
 
-		// Check path match
+		// Check if path matches
 		if strings.HasPrefix(path, rule.Path) {
 			// Convert the rule to models.ForwardingRule
-			modelRule := models.ForwardingRule{
-				ID:                  rule.ID,
-				GatewayID:           rule.GatewayID,
-				Path:                rule.Path,
-				Targets:             rule.Targets,
-				Credentials:         (*models.CredentialsJSON)(rule.Credentials),
-				FallbackTargets:     rule.FallbackTargets,
-				FallbackCredentials: (*models.CredentialsJSON)(rule.FallbackCredentials),
-				Methods:             rule.Methods,
-				Headers:             rule.Headers,
-				StripPath:           rule.StripPath,
-				PreserveHost:        rule.PreserveHost,
-				RetryAttempts:       rule.RetryAttempts,
-				PluginChain:         rule.PluginChain,
-				Active:              rule.Active,
-				Public:              rule.Public,
-				CreatedAt:           time.Now(), // You might want to preserve the original timestamps
-				UpdatedAt:           time.Now(),
+			modelRule := types.ForwardingRule{
+				ID:                    rule.ID,
+				GatewayID:             rule.GatewayID,
+				Path:                  rule.Path,
+				Targets:               models.TargetsJSON(rule.Targets),
+				Credentials:           rule.Credentials,
+				FallbackTargets:       models.TargetsJSON(rule.FallbackTargets),
+				FallbackCredentials:   rule.FallbackCredentials,
+				Methods:               models.MethodsJSON(rule.Methods),
+				Headers:               models.HeadersJSON(rule.Headers),
+				StripPath:             rule.StripPath,
+				PreserveHost:          rule.PreserveHost,
+				RetryAttempts:         rule.RetryAttempts,
+				PluginChain:           rule.PluginChain,
+				Active:                rule.Active,
+				Public:                rule.Public,
+				CreatedAt:             time.Now().Format(time.RFC3339),
+				UpdatedAt:             time.Now().Format(time.RFC3339),
+				LoadBalancingStrategy: rule.LoadBalancingStrategy,
 			}
 			matchingRule = &modelRule
 			break
@@ -255,7 +265,11 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 	}
 
 	if matchingRule == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "No matching rule found for path and method"})
+		s.logger.WithFields(logrus.Fields{
+			"path":   path,
+			"method": method,
+		}).Debug("No matching rule found")
+		c.JSON(http.StatusNotFound, gin.H{"error": "No matching rule found"})
 		return
 	}
 
@@ -284,7 +298,6 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Plugin execution failed"})
 		return
 	}
-
 	// Forward the request
 	response, err := s.forwardRequest(reqCtx, matchingRule)
 	if err != nil {
@@ -293,22 +306,32 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		return
 	}
 
-	// Execute post-request plugins
-	if _, err := s.pluginManager.ExecuteStage(ctx, types.PostRequest, gatewayID.(string), matchingRule.ID, reqCtx, respCtx); err != nil {
-		if pluginErr, ok := err.(*types.PluginError); ok {
-			// Copy headers from response context
-			for k, values := range respCtx.Headers {
-				for _, v := range values {
-					c.Header(k, v)
-				}
-			}
-			c.JSON(pluginErr.StatusCode, gin.H{
-				"error":       pluginErr.Message,
-				"retry_after": respCtx.Metadata["retry_after"],
-			})
+	// Copy response to response context
+	respCtx.StatusCode = response.StatusCode
+	respCtx.Body = response.Body
+	for k, v := range response.Headers {
+		respCtx.Headers[k] = v
+	}
+
+	// If it's an error response (4xx or 5xx), return the original error response
+	if response.StatusCode >= 400 {
+		// Parse the error response
+		var errorResponse map[string]interface{}
+		if err := json.Unmarshal(response.Body, &errorResponse); err != nil {
+			// If we can't parse the error, return a generic error
+			c.JSON(response.StatusCode, gin.H{"error": "Upstream service error"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Plugin execution failed"})
+
+		// Copy all headers from response context to client response
+		for k, values := range respCtx.Headers {
+			for _, v := range values {
+				c.Header(k, v)
+			}
+		}
+
+		// Return the original error response
+		c.JSON(response.StatusCode, errorResponse)
 		return
 	}
 
@@ -331,17 +354,14 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		return
 	}
 
-	// Copy response headers and status
-	for k, values := range response.Headers {
-		for _, v := range values {
-			c.Header(k, v)
-		}
-	}
-
 	// Execute post-response plugins
 	if _, err := s.pluginManager.ExecuteStage(ctx, types.PostResponse, gatewayID.(string), matchingRule.ID, reqCtx, respCtx); err != nil {
 		if pluginErr, ok := err.(*types.PluginError); ok {
 			// Copy headers from response context
+			s.logger.WithFields(logrus.Fields{
+				"headers": respCtx.Headers,
+			}).Debug("Plugin response headers")
+
 			for k, values := range respCtx.Headers {
 				for _, v := range values {
 					c.Header(k, v)
@@ -357,7 +377,15 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		return
 	}
 
-	c.Data(response.StatusCode, "application/json", response.Body)
+	// Copy all headers from response context to client response
+	for k, values := range respCtx.Headers {
+		for _, v := range values {
+			c.Header(k, v)
+		}
+	}
+
+	// Write the response body
+	c.Data(respCtx.StatusCode, "application/json", respCtx.Body)
 }
 
 // Helper function to check if a route is public
@@ -390,24 +418,22 @@ func isPublicRoute(c *gin.Context, cache *cache.Cache) bool {
 	return false
 }
 
-func (s *ProxyServer) configurePlugins(gateway *types.Gateway, rule *models.ForwardingRule) error {
+func (s *ProxyServer) configurePlugins(gateway *types.Gateway, rule *types.ForwardingRule) error {
 	// Configure gateway-level plugins
 	gatewayChains := s.convertGatewayPlugins(gateway)
+	s.logger.WithFields(logrus.Fields{
+		"gatewayChains": gatewayChains,
+	}).Debug("Gateway chains")
 
 	if err := s.pluginManager.SetPluginChain(types.GatewayLevel, gateway.ID, gatewayChains); err != nil {
 		return fmt.Errorf("failed to configure gateway plugins: %w", err)
 	}
 
-	// Configure rule-level plugins
-	s.logger.WithFields(logrus.Fields{
-		"rule": rule,
-	}).Debug("Configuring rule plugins")
-
 	if rule != nil && len(rule.PluginChain) > 0 {
 		s.logger.WithFields(logrus.Fields{
 			"ruleID":  rule.ID,
-			"plugins": len(rule.PluginChain),
-		}).Debug("Configuring rule plugins")
+			"plugins": rule.PluginChain,
+		}).Debug("Rule plugins")
 
 		if err := s.pluginManager.SetPluginChain(types.RuleLevel, rule.ID, rule.PluginChain); err != nil {
 			return fmt.Errorf("failed to configure rule plugins: %w", err)
@@ -420,56 +446,75 @@ func (s *ProxyServer) configurePlugins(gateway *types.Gateway, rule *models.Forw
 func (s *ProxyServer) getGatewayData(ctx context.Context, gatewayID string) (*types.GatewayData, error) {
 	logger := ctx.Value("logger").(*logrus.Logger)
 
-	// Try to get from memory cache first
+	// 1. Try memory cache first
 	if cached, ok := s.gatewayCache.Get(gatewayID); ok {
-		s.logger.WithFields(logrus.Fields{
-			"cached": cached,
-		}).Debug("Cached gateway data")
-		gatewayData := cached.(*types.GatewayData)
+		logger.WithField("fromCache", "memory").Debug("Gateway data found in memory cache")
+		return cached.(*types.GatewayData), nil
+	}
+
+	// 2. Try Redis cache
+	gatewayData, err := s.getGatewayDataFromRedis(ctx, gatewayID)
+	if err == nil {
+		logger.WithFields(logrus.Fields{
+			"gatewayID":  gatewayID,
+			"rulesCount": len(gatewayData.Rules),
+			"fromCache":  "redis",
+		}).Debug("Gateway data found in Redis cache")
+
+		// Store in memory cache
+		s.gatewayCache.Set(gatewayID, gatewayData)
 		return gatewayData, nil
 	}
+	logger.WithError(err).Debug("Failed to get gateway data from Redis")
 
-	// Try to get from Redis cache
-	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
-	if rulesJSON, err := s.cache.Get(ctx, rulesKey); err == nil {
-		// Get gateway from database since we need gateway config
-		gateway, err := s.repo.GetGateway(ctx, gatewayID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get gateway: %w", err)
-		}
+	// 3. Fallback to database
+	return s.getGatewayDataFromDB(ctx, gatewayID)
+}
 
-		// Parse rules from cache
-		var rules []models.ForwardingRule
-		if err := json.Unmarshal([]byte(rulesJSON), &rules); err != nil {
-			logger.WithError(err).Warn("Failed to unmarshal rules from cache")
-		} else {
-			gatewayData := &types.GatewayData{
-				Gateway: convertModelToTypesGateway(gateway),
-				Rules:   convertModelToTypesRules(rules),
-			}
-
-			// Store in memory cache
-			s.gatewayCache.Set(gatewayID, gatewayData)
-
-			logger.WithFields(logrus.Fields{
-				"gatewayID":  gatewayID,
-				"rulesCount": len(rules),
-				"fromCache":  "redis",
-			}).Debug("Gateway rules found in Redis cache")
-
-			return gatewayData, nil
-		}
+func (s *ProxyServer) getGatewayDataFromRedis(ctx context.Context, gatewayID string) (*types.GatewayData, error) {
+	// Get gateway from Redis
+	gatewayKey := fmt.Sprintf("gateway:%s", gatewayID)
+	gatewayJSON, err := s.cache.Get(ctx, gatewayKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get gateway from Redis: %w", err)
 	}
 
-	// Get from database as last resort
+	var gateway *models.Gateway
+	if err := json.Unmarshal([]byte(gatewayJSON), &gateway); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal gateway from Redis: %w", err)
+	}
+
+	// Get rules from Redis
+	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
+	rulesJSON, err := s.cache.Get(ctx, rulesKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get rules from Redis: %w", err)
+	}
+
+	var rules []types.ForwardingRule
+	if err := json.Unmarshal([]byte(rulesJSON), &rules); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal rules from Redis: %w", err)
+	}
+
+	return &types.GatewayData{
+		Gateway: convertModelToTypesGateway(gateway),
+		Rules:   rules,
+	}, nil
+}
+
+func (s *ProxyServer) getGatewayDataFromDB(ctx context.Context, gatewayID string) (*types.GatewayData, error) {
+	logger := ctx.Value("logger").(*logrus.Logger)
+
+	// Get gateway from database
 	gateway, err := s.repo.GetGateway(ctx, gatewayID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get gateway: %w", err)
+		return nil, fmt.Errorf("failed to get gateway from database: %w", err)
 	}
 
+	// Get rules from database
 	rules, err := s.repo.ListRules(ctx, gatewayID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get rules: %w", err)
+		return nil, fmt.Errorf("failed to get rules from database: %w", err)
 	}
 
 	// Convert models to types
@@ -478,12 +523,10 @@ func (s *ProxyServer) getGatewayData(ctx context.Context, gatewayID string) (*ty
 		Rules:   convertModelToTypesRules(rules),
 	}
 
-	// Store in both caches
-	rulesJSON, err := json.Marshal(rules)
-	if err == nil {
-		s.cache.Set(ctx, rulesKey, string(rulesJSON), 0)
+	// Cache the results
+	if err := s.cacheGatewayData(ctx, gatewayID, gateway, rules); err != nil {
+		logger.WithError(err).Warn("Failed to cache gateway data")
 	}
-	s.gatewayCache.Set(gatewayID, gatewayData)
 
 	logger.WithFields(logrus.Fields{
 		"gatewayID":       gatewayID,
@@ -493,6 +536,37 @@ func (s *ProxyServer) getGatewayData(ctx context.Context, gatewayID string) (*ty
 	}).Debug("Loaded gateway data from database")
 
 	return gatewayData, nil
+}
+
+func (s *ProxyServer) cacheGatewayData(ctx context.Context, gatewayID string, gateway *models.Gateway, rules []models.ForwardingRule) error {
+	// Cache gateway
+	gatewayJSON, err := json.Marshal(gateway)
+	if err != nil {
+		return fmt.Errorf("failed to marshal gateway: %w", err)
+	}
+	gatewayKey := fmt.Sprintf("gateway:%s", gatewayID)
+	if err := s.cache.Set(ctx, gatewayKey, string(gatewayJSON), 0); err != nil {
+		return fmt.Errorf("failed to cache gateway: %w", err)
+	}
+
+	// Cache rules
+	rulesJSON, err := json.Marshal(rules)
+	if err != nil {
+		return fmt.Errorf("failed to marshal rules: %w", err)
+	}
+	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
+	if err := s.cache.Set(ctx, rulesKey, string(rulesJSON), 0); err != nil {
+		return fmt.Errorf("failed to cache rules: %w", err)
+	}
+
+	// Cache in memory
+	gatewayData := &types.GatewayData{
+		Gateway: convertModelToTypesGateway(gateway),
+		Rules:   convertModelToTypesRules(rules),
+	}
+	s.gatewayCache.Set(gatewayID, gatewayData)
+
+	return nil
 }
 
 // Helper functions to convert between models and types
@@ -508,8 +582,41 @@ func convertModelToTypesGateway(g *models.Gateway) *types.Gateway {
 		ID:              g.ID,
 		Name:            g.Name,
 		Subdomain:       g.Subdomain,
+		Type:            g.Type,
 		Status:          g.Status,
 		RequiredPlugins: requiredPlugins,
+		Settings:        convertModelToTypesSettings(g.Settings),
+	}
+}
+
+// Helper function to convert GatewaySettings
+func convertModelToTypesSettings(s models.GatewaySettings) types.GatewaySettings {
+	traffic := make([]types.GatewayTraffic, len(s.Traffic))
+	for i, t := range s.Traffic {
+		traffic[i] = types.GatewayTraffic{
+			Provider: t.Provider,
+			Weight:   t.Weight,
+		}
+	}
+
+	providers := make([]types.GatewayProvider, len(s.Providers))
+	for i, p := range s.Providers {
+		providers[i] = types.GatewayProvider{
+			Name:                p.Name,
+			Path:                p.Path,
+			StripPath:           p.StripPath,
+			Credentials:         (*types.Credentials)(&p.Credentials),
+			FallbackProvider:    p.FallbackProvider,
+			FallbackCredentials: (*types.Credentials)(&p.FallbackCredentials),
+			PluginChain:         convertPluginChain(p.PluginChain),
+			AllowedModels:       p.AllowedModels,
+			FallbackModelMap:    p.FallbackModelMap,
+		}
+	}
+
+	return types.GatewaySettings{
+		Traffic:   traffic,
+		Providers: providers,
 	}
 }
 
@@ -527,80 +634,84 @@ func convertModelToTypesRules(rules []models.ForwardingRule) []types.ForwardingR
 
 		// The plugin chain is already []types.PluginConfig, no need for wrapper
 		result = append(result, types.ForwardingRule{
-			ID:                  r.ID,
-			GatewayID:           r.GatewayID,
-			Path:                r.Path,
-			Targets:             r.Targets,
-			Credentials:         r.Credentials.ToCredentials(),
-			FallbackTargets:     r.FallbackTargets,
-			FallbackCredentials: r.FallbackCredentials.ToCredentials(),
-			Methods:             r.Methods,
-			Headers:             headers,
-			StripPath:           r.StripPath,
-			PreserveHost:        r.PreserveHost,
-			RetryAttempts:       r.RetryAttempts,
-			PluginChain:         r.PluginChain, // Use directly, no need for conversion
-			Active:              r.Active,
-			Public:              r.Public,
-			CreatedAt:           r.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:           r.UpdatedAt.Format(time.RFC3339),
+			ID:                    r.ID,
+			GatewayID:             r.GatewayID,
+			Path:                  r.Path,
+			Targets:               r.Targets,
+			Credentials:           r.Credentials.ToCredentials(),
+			FallbackTargets:       r.FallbackTargets,
+			FallbackCredentials:   r.FallbackCredentials.ToCredentials(),
+			Methods:               r.Methods,
+			Headers:               headers,
+			StripPath:             r.StripPath,
+			PreserveHost:          r.PreserveHost,
+			RetryAttempts:         r.RetryAttempts,
+			PluginChain:           r.PluginChain,
+			Active:                r.Active,
+			Public:                r.Public,
+			CreatedAt:             r.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:             r.UpdatedAt.Format(time.RFC3339),
+			LoadBalancingStrategy: r.LoadBalancingStrategy,
 		})
 	}
 	return result
 }
 
-func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *models.ForwardingRule) (*types.ResponseContext, error) {
-	client := &fasthttp.Client{}
-	httpReq := fasthttp.AcquireRequest()
-	httpResp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(httpReq)
-	defer fasthttp.ReleaseResponse(httpResp)
-
-	// Try primary target first
-	targetURL := s.selectTarget(rule)
-	if targetURL == "" {
-		return nil, fmt.Errorf("no valid target found")
+// Helper function to make a request to a specific target
+func (s *ProxyServer) makeTargetRequest(client *fasthttp.Client, req *fasthttp.Request, resp *fasthttp.Response, reqCtx *types.RequestContext, rule *types.ForwardingRule, targetURL string) (*fasthttp.Response, error) {
+	// Get gateway data from context
+	gatewayData, ok := reqCtx.Metadata["gateway_data"].(*types.GatewayData)
+	if !ok {
+		s.logger.Error("Gateway data not found in request context")
+		return nil, fmt.Errorf("gateway data not found")
 	}
 
-	resp, err := s.makeTargetRequest(client, httpReq, httpResp, req, rule, targetURL)
-	if err == nil && resp.StatusCode() < 500 {
-		return s.createResponse(resp), nil
-	}
+	// For model gateways, validate the requested model
+	if gatewayData.Gateway.Type == "models" {
+		// Parse request body to get model
+		var requestBody map[string]interface{}
+		if err := json.Unmarshal(reqCtx.Body, &requestBody); err != nil {
+			s.logger.WithError(err).Error("Failed to parse request body")
+			return nil, fmt.Errorf("invalid request body")
+		}
 
-	// If primary failed and we have fallback targets, try them
-	if len(rule.FallbackTargets) > 0 {
-		s.logger.WithFields(logrus.Fields{
-			"primary_target": targetURL,
-			"error":          err,
-			"status_code":    resp.StatusCode(),
-		}).Info("Primary target failed, trying fallback")
+		// Check if model is specified
+		model, ok := requestBody["model"].(string)
+		if !ok {
+			s.logger.Error("Model not specified in request")
+			return nil, fmt.Errorf("model not specified")
+		}
 
-		// Try each fallback target
-		for _, target := range rule.FallbackTargets {
-			fallbackResp, fallbackErr := s.makeTargetRequest(client, httpReq, httpResp, req, rule, target.URL)
-			if fallbackErr == nil && fallbackResp.StatusCode() < 500 {
-				return s.createResponse(fallbackResp), nil
+		// Find the provider and check allowed models
+		for _, provider := range gatewayData.Gateway.Settings.Providers {
+			if strings.Contains(targetURL, provider.Path) {
+				// If AllowedModels is empty or not specified, all models are allowed
+				if len(provider.AllowedModels) > 0 {
+					modelAllowed := false
+					for _, allowedModel := range provider.AllowedModels {
+						if allowedModel == model {
+							modelAllowed = true
+							break
+						}
+					}
+					if !modelAllowed {
+						s.logger.WithField("model", model).Error("Model not allowed")
+						return nil, fmt.Errorf("model %s not allowed", model)
+					}
+				}
+				break
 			}
-			s.logger.WithError(fallbackErr).Warn("Fallback target failed")
 		}
 	}
 
-	// If we got here, return the original response
-	if err != nil {
-		return nil, err
-	}
-	return s.createResponse(resp), nil
-}
-
-// Helper function to make a request to a specific target
-func (s *ProxyServer) makeTargetRequest(client *fasthttp.Client, req *fasthttp.Request, resp *fasthttp.Response, reqCtx *types.RequestContext, rule *models.ForwardingRule, targetURL string) (*fasthttp.Response, error) {
 	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 		targetURL = "https://" + targetURL // Default to HTTPS
 	}
 
-	// Add path to target URL
+	// Build target URL
+	var targetPath string
 	if rule.StripPath {
-		targetPath := strings.TrimPrefix(reqCtx.Path, rule.Path)
+		targetPath = strings.TrimPrefix(reqCtx.Path, rule.Path)
 		targetURL = strings.TrimRight(targetURL, "/") + "/" + strings.TrimLeft(targetPath, "/")
 		targetURL = strings.TrimSuffix(targetURL, "/")
 	} else {
@@ -616,17 +727,16 @@ func (s *ProxyServer) makeTargetRequest(client *fasthttp.Client, req *fasthttp.R
 	req.SetRequestURI(targetURL)
 	req.Header.SetMethod(reqCtx.Method)
 
-	// Copy headers
+	// Copy headers from original request
 	for k, v := range reqCtx.Headers {
 		for _, val := range v {
 			req.Header.Add(k, val)
 		}
 	}
 
-	// Apply authentication if configured
+	// Apply authentication if configured and not already set
 	if rule.Credentials != nil {
-		s.logger.Debug("Applying authentication")
-		s.applyAuthentication(req, rule.Credentials.ToCredentials(), reqCtx.Body)
+		s.applyAuthentication(req, rule.Credentials, reqCtx.Body)
 	} else {
 		s.logger.Debug("No credentials found")
 	}
@@ -635,9 +745,12 @@ func (s *ProxyServer) makeTargetRequest(client *fasthttp.Client, req *fasthttp.R
 	if len(reqCtx.Body) > 0 {
 		req.SetBody(reqCtx.Body)
 	}
+
 	s.logger.WithFields(logrus.Fields{
 		"headers": req.Header.String(),
-	}).Debug("Setting request headers")
+		"url":     targetURL,
+	}).Debug("Making request")
+
 	// Make the request
 	err := client.Do(req, resp)
 	if err != nil {
@@ -645,6 +758,224 @@ func (s *ProxyServer) makeTargetRequest(client *fasthttp.Client, req *fasthttp.R
 	}
 
 	return resp, nil
+}
+
+// Helper function to find the fallback provider configuration
+func (s *ProxyServer) findFallbackProvider(gatewayData *types.GatewayData, primaryProviderPath string) (*types.GatewayProvider, error) {
+	for _, p := range gatewayData.Gateway.Settings.Providers {
+		if p.Path == primaryProviderPath && p.FallbackProvider != "" {
+			return &p, nil
+		}
+	}
+	return nil, fmt.Errorf("no fallback provider found for path %s", primaryProviderPath)
+}
+
+// Helper function to get the fallback URL with mapped endpoint
+func (s *ProxyServer) getFallbackURL(provider *types.GatewayProvider, fallbackTarget string, originalPath string) (string, error) {
+	// Load provider configuration
+	providerConfig, err := config.LoadProviderConfig()
+	if err != nil {
+		return "", fmt.Errorf("failed to load provider config: %v", err)
+	}
+
+	// Extract endpoint type from original path
+	endpointType := "chat"
+	if strings.Contains(originalPath, "completions") {
+		if strings.Contains(originalPath, "chat/completions") {
+			endpointType = "chat"
+		} else {
+			endpointType = "completions"
+		}
+	} else if strings.Contains(originalPath, "embeddings") {
+		endpointType = "embeddings"
+	}
+
+	// Find the target provider and map the endpoint
+	var mappedPath string
+	if providerCfg, ok := providerConfig.Providers[provider.FallbackProvider]; ok {
+		if endpoint, ok := providerCfg.Endpoints[endpointType]; ok {
+			mappedPath = endpoint
+			s.logger.WithFields(logrus.Fields{
+				"provider": provider.FallbackProvider,
+				"endpoint": endpoint,
+			}).Debug("Mapped fallback endpoint")
+		}
+	}
+
+	if mappedPath == "" {
+		return "", fmt.Errorf("no endpoint mapping found for %s", endpointType)
+	}
+
+	// Construct the full URL
+	fallbackURL := fallbackTarget
+	if !strings.HasPrefix(fallbackURL, "http://") && !strings.HasPrefix(fallbackURL, "https://") {
+		fallbackURL = "https://" + fallbackURL
+	}
+	return strings.TrimRight(fallbackURL, "/") + mappedPath, nil
+}
+
+// Helper function to transform request body for fallback provider
+func (s *ProxyServer) transformRequestForProvider(provider *types.GatewayProvider, requestData map[string]interface{}) ([]byte, error) {
+	// Map model if mapping exists
+	if model, ok := requestData["model"].(string); ok {
+		if fallbackModel, exists := provider.FallbackModelMap[model]; exists {
+			requestData["model"] = fallbackModel
+		}
+	}
+
+	if provider.FallbackProvider == "anthropic" {
+		requestData["max_tokens"] = 1024
+		return json.Marshal(requestData)
+	}
+
+	// For other providers, just update the model and keep the same format
+	return json.Marshal(requestData)
+}
+
+// Main fallback request function
+func (s *ProxyServer) makeFallbackRequest(ctx context.Context, gatewayData *types.GatewayData, req *types.RequestContext, reqBody []byte) (*fasthttp.Response, error) {
+	// Parse request body
+	var requestData map[string]interface{}
+	if err := json.Unmarshal(reqBody, &requestData); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal request body: %v", err)
+	}
+
+	// Extract primary provider path from the request path
+	primaryProviderPath := "/"
+	for _, provider := range gatewayData.Gateway.Settings.Providers {
+		if strings.HasPrefix(req.Path, provider.Path) {
+			primaryProviderPath = provider.Path
+			break
+		}
+	}
+
+	// Find the provider with fallback configuration
+	provider, err := s.findFallbackProvider(gatewayData, primaryProviderPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Find the fallback rule and target
+	var fallbackRule *types.ForwardingRule
+	var fallbackTarget string
+	for _, rule := range gatewayData.Rules {
+		if rule.Path == provider.Path {
+			fallbackRule = &rule
+			if len(rule.FallbackTargets) > 0 {
+				fallbackTarget = rule.FallbackTargets[0].URL
+			}
+			break
+		}
+	}
+	if fallbackTarget == "" {
+		return nil, fmt.Errorf("no fallback target found for provider %s", provider.Name)
+	}
+
+	// Get the fallback URL with mapped endpoint
+	fallbackURL, err := s.getFallbackURL(provider, fallbackTarget, req.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Transform request body for the fallback provider
+	updatedReqBody, err := s.transformRequestForProvider(provider, requestData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to transform request body: %v", err)
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"fallback_url": fallbackURL,
+		"body":         string(updatedReqBody),
+	}).Debug("Fallback request details")
+
+	// Create and prepare the fallback request
+	client := &fasthttp.Client{}
+	httpReq := fasthttp.AcquireRequest()
+	httpResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(httpReq)
+
+	// Set request details
+	httpReq.SetRequestURI(fallbackURL)
+	httpReq.Header.SetMethod(req.Method)
+	httpReq.SetBody(updatedReqBody)
+
+	// Copy headers from original request
+	for key, values := range req.Headers {
+		for _, value := range values {
+			httpReq.Header.Add(key, value)
+		}
+	}
+
+	// Apply authentication using the fallback credentials
+	if fallbackRule != nil && fallbackRule.FallbackCredentials != nil {
+		s.applyAuthentication(httpReq, fallbackRule.FallbackCredentials, updatedReqBody)
+	} else if provider.FallbackCredentials != nil {
+		s.applyAuthentication(httpReq, provider.FallbackCredentials, updatedReqBody)
+	}
+
+	// Make fallback request
+	if err := client.Do(httpReq, httpResp); err != nil {
+		return nil, fmt.Errorf("failed to make fallback request: %v", err)
+	}
+
+	return httpResp, nil
+}
+
+func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.ForwardingRule) (*types.ResponseContext, error) {
+	client := &fasthttp.Client{}
+	httpReq := fasthttp.AcquireRequest()
+	httpResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(httpReq)
+	defer fasthttp.ReleaseResponse(httpResp)
+
+	// Use the loadBalancer to select the target
+	target, err := s.loadBalancer.SelectTarget(rule)
+	if err != nil {
+		return nil, fmt.Errorf("failed to select target: %w", err)
+	}
+	if target == nil {
+		return nil, fmt.Errorf("no valid target found")
+	}
+
+	resp, err := s.makeTargetRequest(client, httpReq, httpResp, req, rule, target.URL)
+	if err == nil && resp.StatusCode() < 400 {
+		return s.createResponse(resp), nil
+	}
+
+	// If primary failed and we have fallback targets, try them
+	if len(rule.FallbackTargets) > 0 {
+		s.logger.WithFields(logrus.Fields{
+			"primary_target": target.URL,
+			"error":          err,
+			"status_code":    resp != nil && resp.StatusCode() > 0,
+		}).Info("Primary target failed, trying fallback")
+
+		// Get gateway data from context
+		gatewayData, ok := req.Metadata["gateway_data"].(*types.GatewayData)
+		if !ok {
+			return nil, fmt.Errorf("gateway data not found in request context")
+		}
+
+		// Try fallback request
+		fallbackResp, fallbackErr := s.makeFallbackRequest(context.Background(), gatewayData, req, req.Body)
+		if fallbackErr != nil {
+			s.logger.WithFields(logrus.Fields{
+				"error": fallbackErr,
+			}).Warn("Fallback request failed")
+		}
+		if fallbackErr == nil && fallbackResp != nil && fallbackResp.StatusCode() < 400 {
+			return s.createResponse(fallbackResp), nil
+		}
+	}
+
+	// If we got here, return the original response if available, otherwise return the error
+	if err != nil {
+		return nil, err
+	}
+	if resp != nil {
+		return s.createResponse(resp), nil
+	}
+	return nil, fmt.Errorf("all targets failed")
 }
 
 // Convert types.Credentials to CredentialsJSON
@@ -671,7 +1002,6 @@ func (s *ProxyServer) applyAuthentication(req *fasthttp.Request, creds *types.Cr
 	// Parameter-based auth
 	if creds.ParamName != "" && creds.ParamValue != "" {
 		if creds.ParamLocation == "query" {
-			// Add to query parameters
 			uri := req.URI()
 			args := uri.QueryArgs()
 			args.Set(creds.ParamName, creds.ParamValue)
@@ -696,11 +1026,6 @@ func (s *ProxyServer) applyAuthentication(req *fasthttp.Request, creds *types.Cr
 			req.SetBody(newBody)
 		}
 	}
-
-	// Add debug logging to verify headers
-	s.logger.WithFields(logrus.Fields{
-		"final_headers": req.Header.String(),
-	}).Debug("Final request headers after auth")
 }
 
 // Helper function to create ResponseContext from fasthttp.Response
@@ -730,11 +1055,34 @@ func (s *ProxyServer) PluginManager() *plugins.Manager {
 
 func (s *ProxyServer) convertGatewayPlugins(gateway *types.Gateway) []types.PluginConfig {
 	var chains []types.PluginConfig
-
 	for _, config := range gateway.RequiredPlugins {
-		pluginConfig := config
-		pluginConfig.Level = types.GatewayLevel
-		chains = append(chains, pluginConfig)
+		if config.Enabled {
+			// Get the plugin to check its stages
+			plugin := s.pluginManager.GetPlugin(config.Name)
+			if plugin == nil {
+				s.logger.WithField("plugin", config.Name).Error("Plugin not found")
+				continue
+			}
+
+			// Check if this is a fixed-stage plugin
+			supportedStages := plugin.Stages()
+			if len(supportedStages) > 0 {
+				// For fixed-stage plugins, just add the config without a stage
+				// The stage will be set when executing based on the plugin's supported stages
+				pluginConfig := config
+				pluginConfig.Level = types.GatewayLevel
+				chains = append(chains, pluginConfig)
+			} else {
+				// For user-configured plugins, the stage must be set in the config
+				if config.Stage == "" {
+					s.logger.WithField("plugin", config.Name).Error("Stage not configured for plugin")
+					continue
+				}
+				pluginConfig := config
+				pluginConfig.Level = types.GatewayLevel
+				chains = append(chains, pluginConfig)
+			}
+		}
 	}
 	return chains
 }
@@ -781,73 +1129,14 @@ func (s *ProxyServer) subscribeToEvents() {
 	}
 }
 
-func (s *ProxyServer) selectTarget(rule *models.ForwardingRule) string {
-	targets := rule.Targets
-	if len(targets) == 0 {
-		return ""
-	}
-
-	// Check if any weights are specified
-	hasWeights := false
-	totalWeight := 0
-	for _, target := range targets {
-		if target.Weight > 0 {
-			hasWeights = true
-			totalWeight += target.Weight
+// Helper function to convert string slice to PluginConfig slice
+func convertPluginChain(chain []string) []types.PluginConfig {
+	configs := make([]types.PluginConfig, len(chain))
+	for i, name := range chain {
+		configs[i] = types.PluginConfig{
+			Name:    name,
+			Enabled: true,
 		}
 	}
-
-	if hasWeights {
-		// Validate total weight is 100%
-		if totalWeight != 100 {
-			s.logger.WithFields(logrus.Fields{
-				"ruleID":      rule.ID,
-				"totalWeight": totalWeight,
-			}).Error("Invalid target weights - must sum to 100")
-			// Fallback to round-robin if weights are invalid
-			return s.roundRobinSelect(rule)
-		}
-
-		// Use Redis for consistent percentage-based distribution
-		counterKey := fmt.Sprintf("weight_counter:%s", rule.ID)
-		count, err := s.cache.Client().Incr(context.Background(), counterKey).Result()
-		if err != nil {
-			s.logger.WithError(err).Error("Failed to increment weight counter")
-			return targets[rand.Intn(len(targets))].URL
-		}
-
-		if count == 1 {
-			s.cache.Client().Expire(context.Background(), counterKey, 24*time.Hour)
-		}
-
-		// Calculate position (0-99)
-		position := count % 100
-		currentWeight := 0
-		for _, target := range targets {
-			currentWeight += target.Weight
-			if int64(currentWeight) > position {
-				return target.URL
-			}
-		}
-		return targets[len(targets)-1].URL
-	}
-
-	return s.roundRobinSelect(rule)
-}
-
-// Helper function for round-robin selection
-func (s *ProxyServer) roundRobinSelect(rule *models.ForwardingRule) string {
-	counterKey := fmt.Sprintf("target_counter:%s", rule.ID)
-	count, err := s.cache.Client().Incr(context.Background(), counterKey).Result()
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to increment target counter")
-		return rule.Targets[rand.Intn(len(rule.Targets))].URL
-	}
-
-	if count == 1 {
-		s.cache.Client().Expire(context.Background(), counterKey, 24*time.Hour)
-	}
-
-	index := (count - 1) % int64(len(rule.Targets))
-	return rule.Targets[index].URL
+	return configs
 }

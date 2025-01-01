@@ -51,28 +51,31 @@ func FromCredentials(c *types.Credentials) *CredentialsJSON {
 	return &creds
 }
 
+// ForwardingRule represents a forwarding rule in the database
 type ForwardingRule struct {
-	ID                  string           `json:"id" gorm:"primaryKey"`
-	GatewayID           string           `json:"gateway_id"`
-	Path                string           `json:"path"`
-	Targets             TargetsJSON      `json:"targets" gorm:"type:jsonb"`
-	FallbackTargets     TargetsJSON      `json:"fallback_targets,omitempty" gorm:"type:jsonb"`
-	Methods             MethodsJSON      `json:"methods" gorm:"type:jsonb"`
-	Headers             HeadersJSON      `json:"headers" gorm:"type:jsonb"`
-	StripPath           bool             `json:"strip_path"`
-	PreserveHost        bool             `json:"preserve_host"`
-	RetryAttempts       int              `json:"retry_attempts"`
-	PluginChain         PluginChainJSON  `json:"plugin_chain" gorm:"type:jsonb"`
-	Active              bool             `json:"active"`
-	Public              bool             `json:"public"`
-	CreatedAt           time.Time        `json:"created_at"`
-	UpdatedAt           time.Time        `json:"updated_at"`
-	Credentials         *CredentialsJSON `json:"credentials,omitempty" gorm:"type:jsonb"`
-	FallbackCredentials *CredentialsJSON `json:"fallback_credentials,omitempty" gorm:"type:jsonb"`
+	ID                    string            `gorm:"primaryKey"`
+	GatewayID             string            `gorm:"not null"`
+	Path                  string            `gorm:"not null"`
+	Targets               TargetsJSON       `gorm:"type:jsonb;not null"`
+	Credentials           *CredentialsJSON  `json:"credentials" gorm:"type:jsonb"`
+	FallbackTargets       TargetsJSON       `json:"fallback_targets" gorm:"type:jsonb"`
+	FallbackProvider      string            `json:"fallback_provider,omitempty"`
+	FallbackCredentials   *CredentialsJSON  `json:"fallback_credentials" gorm:"type:jsonb"`
+	Methods               MethodsJSON       `gorm:"type:jsonb"`
+	Headers               map[string]string `gorm:"type:jsonb"`
+	StripPath             bool              `gorm:"default:false"`
+	PreserveHost          bool              `gorm:"default:false"`
+	RetryAttempts         int               `gorm:"default:0"`
+	PluginChain           PluginChainJSON   `gorm:"type:jsonb"`
+	Active                bool              `gorm:"default:true"`
+	Public                bool              `gorm:"default:false"`
+	CreatedAt             time.Time
+	UpdatedAt             time.Time
+	LoadBalancingStrategy string `gorm:"default:'round_robin'"`
 }
 
-// TargetsJSON implements SQL/JSON conversion for []types.ForwardingTarget
-type TargetsJSON []types.ForwardingTarget
+// TargetsJSON implements SQL/JSON conversion for []types.Target
+type TargetsJSON []types.Target
 
 // Value implements the driver.Valuer interface
 func (t TargetsJSON) Value() (driver.Value, error) {

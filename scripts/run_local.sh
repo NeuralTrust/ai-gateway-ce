@@ -34,11 +34,11 @@ wait_for_server() {
 if [ "$VERSION" = "ce" ]; then
     # Start CE servers
     echo -e "${GREEN}Starting CE Admin server...${NC}"
-    LOG_LEVEL=debug go run cmd/gateway/main.go admin > logs/admin.log 2>&1 &
+    LOG_LEVEL=debug go run cmd/gateway/main.go admin 2>&1 &
     ADMIN_PID=$!
 
     echo -e "${GREEN}Starting CE Proxy server...${NC}"
-    LOG_LEVEL=debug go run cmd/gateway/main.go proxy > logs/proxy.log 2>&1 &
+    LOG_LEVEL=debug go run cmd/gateway/main.go proxy 2>&1 &
     PROXY_PID=$!
 elif [ "$VERSION" = "ee" ]; then
     # Start EE servers

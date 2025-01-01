@@ -11,6 +11,7 @@ import (
 type ProviderConfig struct {
 	BaseURL   string            `yaml:"base_url"`
 	Endpoints map[string]string `yaml:"endpoints"`
+	ModelMap  map[string]string `yaml:"model_map"`
 }
 
 // ProvidersConfig represents the configuration for all providers

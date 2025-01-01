@@ -16,6 +16,10 @@ import (
 	"ai-gateway-ce/pkg/types"
 )
 
+const (
+	PluginName = "rate_limiter"
+)
+
 type RateLimiterPlugin struct {
 	redis  *redis.Client
 	limits map[string]LimitConfig
@@ -42,10 +46,14 @@ func NewRateLimiterPlugin(redisClient *redis.Client) pluginiface.Plugin {
 }
 
 func (r *RateLimiterPlugin) Name() string {
-	return "rate_limiter"
+	return PluginName
 }
 
 func (r *RateLimiterPlugin) Stages() []types.Stage {
+	return []types.Stage{types.PreRequest}
+}
+
+func (r *RateLimiterPlugin) AllowedStages() []types.Stage {
 	return []types.Stage{types.PreRequest}
 }
 

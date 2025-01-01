@@ -49,6 +49,13 @@ func (m *GatewayMiddleware) IdentifyGateway() gin.HandlerFunc {
 			return
 		}
 
+		if host == "" {
+			m.logger.Error("No host header found")
+			c.JSON(400, gin.H{"error": "Host header required"})
+			c.Abort()
+			return
+		}
+
 		subdomain := m.extractSubdomain(host)
 		if subdomain == "" {
 			m.logger.WithFields(logrus.Fields{
@@ -125,31 +132,34 @@ func (m *GatewayMiddleware) extractSubdomain(host string) string {
 		"baseDomain": m.baseDomain,
 	}).Debug("Extracting subdomain")
 
-	// Remove port if present
-	if colonIndex := strings.Index(host, ":"); colonIndex != -1 {
-		host = host[:colonIndex]
-		m.logger.WithFields(logrus.Fields{
-			"original": host + ":" + host[colonIndex+1:],
-			"stripped": host,
-		}).Debug("Removed port from host")
-	}
+	// Remove port if present using strings.Split
+	host = strings.Split(host, ":")[0]
+	m.logger.WithFields(logrus.Fields{
+		"host": host,
+	}).Debug("Removed port from host")
 
 	// Check if host ends with base domain
 	suffix := "." + m.baseDomain
 	if !strings.HasSuffix(host, suffix) {
-		m.logger.WithFields(logrus.Fields{
-			"host":       host,
-			"baseDomain": m.baseDomain,
-			"suffix":     suffix,
-			"hasSuffix":  strings.HasSuffix(host, suffix),
-			"hostLen":    len(host),
-			"suffixLen":  len(suffix),
-		}).Debug("Host does not match base domain")
-		return ""
+		if strings.HasSuffix(host, m.baseDomain) {
+			// If host matches base domain exactly without dot
+			suffix = m.baseDomain
+		} else {
+			m.logger.WithFields(logrus.Fields{
+				"host":       host,
+				"baseDomain": m.baseDomain,
+				"suffix":     suffix,
+			}).Debug("Host does not match base domain")
+			return ""
+		}
 	}
 
-	// Extract subdomain by removing the base domain and the dot
+	// Extract subdomain by removing the base domain
 	subdomain := strings.TrimSuffix(host, suffix)
+
+	// Remove trailing dot if present
+	subdomain = strings.TrimSuffix(subdomain, ".")
+
 	if subdomain == "" {
 		m.logger.WithFields(logrus.Fields{
 			"host":   host,

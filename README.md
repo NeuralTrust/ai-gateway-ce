@@ -92,6 +92,119 @@ type RateLimiter struct {
 - Automatic cleanup to prevent memory leaks
 - Thread-safe operations with minimal lock contention
 
+### Token Rate Limiter Plugin
+
+The Token Rate Limiter plugin provides token-based rate limiting specifically designed for AI API requests. It tracks and limits token usage per request, making it ideal for services like OpenAI that use token-based billing.
+
+#### Features
+- **Pre-Request Token Check**: Validates if enough tokens are available before forwarding requests
+- **Post-Response Token Tracking**: Accurately tracks actual token usage from API responses
+- **Configurable Parameters**:
+  - `tokens_per_request`: Default number of tokens consumed per request (used as fallback)
+  - `tokens_per_minute`: Token replenishment rate per minute
+  - `bucket_size`: Maximum number of tokens that can be accumulated
+
+#### Token Calculation
+1. **Pre-Request Stage**:
+   - Checks if the token bucket has at least `tokens_per_request` tokens
+   - Returns 429 error if insufficient tokens available
+
+2. **Post-Response Stage**:
+   - Extracts actual token usage from API response if available
+   - Falls back to `tokens_per_request` if actual usage can't be determined
+   - Updates token bucket and rate limit headers
+
+#### Rate Limit Headers
+The plugin sets the following headers in responses:
+- `X-RateLimit-Remaining`: Current number of tokens available
+- `X-RateLimit-Limit`: Maximum bucket size
+- `X-RateLimit-Reset`: Unix timestamp when tokens will be replenished
+- `X-Tokens-Consumed`: Number of tokens consumed by the request
+
+## Token Rate Limiter Plugin
+
+The token rate limiter plugin implements a token bucket algorithm to control the rate of requests and token consumption for LLM APIs. It tracks both request counts and token usage per API key.
+
+### Configuration
+
+```json
+{
+  "name": "token_rate_limiter",
+  "enabled": true,
+  "settings": {
+    "tokens_per_request": 20,       // Default tokens to consume if can't get from response
+    "tokens_per_minute": 100,       // Token replenishment rate per minute
+    "bucket_size": 150000,          // Maximum tokens that can be accumulated
+    "requests_per_minute": 60       // Maximum requests allowed per minute
+  }
+}
+```
+
+### Settings Description
+
+- `tokens_per_request`: Default number of tokens to consume when actual token usage cannot be determined from the response
+- `tokens_per_minute`: Number of tokens replenished per minute
+- `bucket_size`: Maximum number of tokens that can be accumulated in the bucket
+- `requests_per_minute`: Maximum number of requests allowed per minute
+
+### Rate Limit Headers
+
+The plugin adds the following headers to responses:
+
+- `x-ratelimit-limit-requests`: Maximum requests allowed per minute
+- `x-ratelimit-limit-tokens`: Maximum tokens allowed in bucket
+- `x-ratelimit-remaining-requests`: Remaining requests for current minute
+- `x-ratelimit-remaining-tokens`: Remaining tokens in bucket
+- `x-ratelimit-reset-requests`: Seconds until request count resets
+- `x-ratelimit-reset-tokens`: Seconds until next token replenishment
+- `x-tokens-consumed`: Number of tokens consumed by the request
+
+### Behavior
+
+1. **Pre-Request Stage**:
+   - Checks if enough tokens are available in the bucket
+   - Verifies request count hasn't exceeded limit
+   - Returns 429 status if either limit is exceeded
+
+2. **Post-Response Stage**:
+   - Extracts actual token usage from LLM response
+   - Falls back to `tokens_per_request` if usage data unavailable
+   - Updates token bucket and request count
+   - Adds rate limit headers to response
+
+### Token Bucket Algorithm
+
+- Tokens are replenished at the rate of `tokens_per_minute`
+- Request count resets every minute
+- Both tokens and requests are tracked per API key
+- Token bucket cannot exceed `bucket_size`
+- Request count cannot exceed `requests_per_minute`
+
+### Example Usage
+
+```json
+{
+  "required_plugins": [
+    {
+      "name": "token_rate_limiter",
+      "enabled": true,
+      "settings": {
+        "tokens_per_request": 20,
+        "tokens_per_minute": 100,
+        "bucket_size": 150000,
+        "requests_per_minute": 60
+      }
+    }
+  ]
+}
+```
+
+This configuration allows:
+- Maximum 60 requests per minute
+- Token replenishment of 100 tokens per minute
+- Maximum bucket size of 150,000 tokens
+- Default consumption of 20 tokens per request
+
 ## Quick Start
 
 1. Clone the repository:

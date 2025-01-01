@@ -414,12 +414,10 @@ func (s *AdminServer) createAPIKey(c *gin.Context) {
 		Key:       generateAPIKey(),
 	}
 
-	// Set expiration only if provided
 	if req.ExpiresAt != nil {
 		apiKey.ExpiresAt = *req.ExpiresAt
 	}
 
-	// Store in database
 	if err := s.repo.CreateAPIKey(c, apiKey); err != nil {
 		s.logger.WithError(err).Error("Failed to create API key")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create API key"})
@@ -487,100 +485,6 @@ func (s *AdminServer) getAPIKeyHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, apiKey)
 }
 
-func (s *AdminServer) updateRulesCache(ctx context.Context, gatewayID string) error {
-	s.logger.WithFields(logrus.Fields{
-		"gateway_id": gatewayID,
-	}).Info("Updating rules cache")
-
-	// Get rules from database
-	rules, err := s.repo.ListRules(ctx, gatewayID)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to list rules")
-		return err
-	}
-
-	s.logger.WithFields(logrus.Fields{
-		"rules_count": len(rules),
-		"rules":       rules,
-	}).Debug("Retrieved rules from database")
-
-	// Convert database rules to API rules
-	apiRules := make([]types.ForwardingRule, len(rules))
-	for i, rule := range rules {
-		s.logger.WithFields(logrus.Fields{
-			"rule_id": rule.ID,
-			"path":    rule.Path,
-			"targets": rule.Targets,
-			"methods": rule.Methods,
-		}).Debug("Converting rule")
-
-		var pluginChain []types.PluginConfig
-		if rule.PluginChain != nil {
-			chainJSON, _ := json.Marshal(rule.PluginChain)
-			if err := json.Unmarshal(chainJSON, &pluginChain); err != nil {
-				s.logger.WithError(err).Error("Failed to unmarshal plugin chain")
-				continue
-			}
-		}
-
-		// Convert headers from []string to map[string]string
-		headers := make(map[string]string)
-		for _, h := range rule.Headers {
-			parts := strings.SplitN(h, ":", 2)
-			if len(parts) == 2 {
-				headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
-			}
-		}
-
-		apiRules[i] = types.ForwardingRule{
-			ID:            rule.ID,
-			GatewayID:     rule.GatewayID,
-			Path:          rule.Path,
-			Targets:       rule.Targets,
-			Methods:       []string(rule.Methods),
-			Headers:       headers,
-			StripPath:     rule.StripPath,
-			PreserveHost:  rule.PreserveHost,
-			RetryAttempts: rule.RetryAttempts,
-
-			PluginChain: pluginChain,
-			Active:      rule.Active,
-			Public:      rule.Public,
-			CreatedAt:   rule.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:   rule.UpdatedAt.Format(time.RFC3339),
-		}
-
-		s.logger.WithFields(logrus.Fields{
-			"rule_id":      apiRules[i].ID,
-			"path":         apiRules[i].Path,
-			"targets":      apiRules[i].Targets,
-			"methods":      apiRules[i].Methods,
-			"plugin_chain": apiRules[i].PluginChain,
-		}).Debug("Converted rule")
-	}
-
-	// Marshal rules to JSON
-	rulesJSON, err := json.Marshal(apiRules)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to marshal rules")
-		return err
-	}
-
-	s.logger.WithFields(logrus.Fields{
-		"rules_json": string(rulesJSON),
-	}).Debug("Marshaled rules to JSON")
-
-	// Store in cache
-	rulesKey := fmt.Sprintf("rules:%s", gatewayID)
-	if err := s.cache.Set(ctx, rulesKey, string(rulesJSON), 0); err != nil {
-		s.logger.WithError(err).Error("Failed to store rules in cache")
-		return err
-	}
-
-	s.logger.Info("Successfully updated rules cache")
-	return nil
-}
-
 func (s *AdminServer) updateGatewayCache(ctx context.Context, gateway *models.Gateway) error {
 	if err := validateGatewayID(gateway.ID); err != nil {
 		return fmt.Errorf("invalid gateway ID: %w", err)
@@ -622,55 +526,6 @@ func (s *AdminServer) convertDBGatewayToAPI(dbGateway *models.Gateway) (*types.G
 	}, nil
 }
 
-// updateGatewaysList updates the list of all gateways in Redis
-func (s *AdminServer) updateGatewaysList(ctx context.Context) error {
-	s.logger.Info("Starting to update gateways list")
-
-	// Get all gateways from database
-	gateways, err := s.repo.ListGateways(ctx, 0, 1000)
-	if err != nil {
-		s.logger.WithError(err).Error("Failed to list gateways from database")
-		return fmt.Errorf("failed to list gateways: %w", err)
-	}
-
-	s.logger.WithField("count", len(gateways)).Info("Retrieved gateways from database")
-
-	// Convert to API types
-	var apiGateways []types.Gateway
-	for _, dbGateway := range gateways {
-		s.logger.WithFields(logrus.Fields{
-			"gateway_id": dbGateway.ID,
-			"name":       dbGateway.Name,
-			"subdomain":  dbGateway.Subdomain,
-		}).Debug("Processing gateway for list")
-
-		// Initialize required plugins if nil
-		if dbGateway.RequiredPlugins == nil {
-			dbGateway.RequiredPlugins = []types.PluginConfig{}
-		}
-
-		apiGateway, err := s.convertDBGatewayToAPI(&dbGateway)
-		if err != nil {
-			s.logger.WithError(err).WithField("gateway_id", dbGateway.ID).Error("Failed to convert gateway")
-			continue
-		}
-		apiGateways = append(apiGateways, *apiGateway)
-	}
-
-	// Store in cache
-	gatewaysJSON, err := json.Marshal(apiGateways)
-	if err != nil {
-		return fmt.Errorf("failed to marshal gateways: %w", err)
-	}
-
-	if err := s.cache.Set(ctx, "gateways", string(gatewaysJSON), 0); err != nil {
-		return fmt.Errorf("failed to cache gateways list: %w", err)
-	}
-
-	s.logger.WithField("count", len(apiGateways)).Info("Successfully updated gateways list in cache")
-	return nil
-}
-
 // Helper function to validate gateway ID format
 func validateGatewayID(id string) error {
 	if id == "" {
@@ -706,37 +561,37 @@ func (s *AdminServer) getRuleResponse(rule *models.ForwardingRule) types.Forward
 	}
 
 	return types.ForwardingRule{
-		ID:              rule.ID,
-		GatewayID:       rule.GatewayID,
-		Path:            rule.Path,
-		Targets:         []types.ForwardingTarget(rule.Targets),
-		FallbackTargets: []types.ForwardingTarget(rule.FallbackTargets),
-		Methods:         []string(rule.Methods),
-		Headers:         headers,
-		StripPath:       rule.StripPath,
-		PreserveHost:    rule.PreserveHost,
-		RetryAttempts:   rule.RetryAttempts,
-		PluginChain:     pluginChain,
-		Active:          rule.Active,
-		Public:          rule.Public,
-		CreatedAt:       rule.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:       rule.UpdatedAt.Format(time.RFC3339),
+		ID:                    rule.ID,
+		GatewayID:             rule.GatewayID,
+		Path:                  rule.Path,
+		Targets:               rule.Targets,
+		FallbackTargets:       rule.FallbackTargets,
+		Methods:               []string(rule.Methods),
+		Headers:               headers,
+		StripPath:             rule.StripPath,
+		PreserveHost:          rule.PreserveHost,
+		RetryAttempts:         rule.RetryAttempts,
+		PluginChain:           pluginChain,
+		Active:                rule.Active,
+		Public:                rule.Public,
+		CreatedAt:             rule.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:             rule.UpdatedAt.Format(time.RFC3339),
+		LoadBalancingStrategy: rule.LoadBalancingStrategy,
 	}
 }
 
 // Rule management methods
 func (s *AdminServer) createRule(c *gin.Context) {
 	gatewayID := c.Param("gateway_id")
+
 	var req types.CreateRuleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		s.logger.WithError(err).Error("Failed to bind request")
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	// Validate the rule request
 	if err := s.validateRule(&req); err != nil {
-		s.logger.WithError(err).Error("Rule validation failed")
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -765,23 +620,24 @@ func (s *AdminServer) createRule(c *gin.Context) {
 
 	// Create the database model
 	dbRule := &models.ForwardingRule{
-		ID:                  uuid.NewString(),
-		GatewayID:           gatewayID,
-		Path:                req.Path,
-		Targets:             models.TargetsJSON(req.Targets),
-		FallbackTargets:     models.TargetsJSON(req.FallbackTargets),
-		Methods:             models.MethodsJSON(req.Methods),
-		Headers:             models.HeadersJSON(req.Headers),
-		StripPath:           stripPath,
-		PreserveHost:        preserveHost,
-		RetryAttempts:       retryAttempts,
-		PluginChain:         req.PluginChain,
-		Active:              true,
-		Public:              false,
-		CreatedAt:           time.Now(),
-		UpdatedAt:           time.Now(),
-		Credentials:         models.FromCredentials(req.Credentials),
-		FallbackCredentials: models.FromCredentials(req.FallbackCredentials),
+		ID:                    uuid.NewString(),
+		GatewayID:             gatewayID,
+		Path:                  req.Path,
+		Targets:               models.TargetsJSON(req.Targets),
+		FallbackTargets:       models.TargetsJSON(req.FallbackTargets),
+		Methods:               req.Methods,
+		Headers:               models.HeadersJSON(req.Headers),
+		StripPath:             stripPath,
+		PreserveHost:          preserveHost,
+		RetryAttempts:         retryAttempts,
+		PluginChain:           req.PluginChain,
+		Active:                true,
+		Public:                false,
+		CreatedAt:             time.Now(),
+		UpdatedAt:             time.Now(),
+		Credentials:           models.FromCredentials(req.Credentials),
+		FallbackCredentials:   models.FromCredentials(req.FallbackCredentials),
+		LoadBalancingStrategy: req.LoadBalancingStrategy,
 	}
 
 	// Store in database
@@ -791,20 +647,8 @@ func (s *AdminServer) createRule(c *gin.Context) {
 		return
 	}
 
-	// Update rules cache
-	if err := s.updateRulesCache(c.Request.Context(), gatewayID); err != nil {
-		s.logger.WithError(err).Error("Failed to update rules cache")
-		// Continue anyway as rule is in DB
-	}
-
-	// Convert database model to API response type
+	// Use existing helper to convert to API response
 	response := s.getRuleResponse(dbRule)
-
-	// After successfully creating the rule
-	if err := s.publishCacheInvalidation(c.Request.Context(), gatewayID); err != nil {
-		s.logger.WithError(err).Error("Failed to publish cache invalidation")
-		// Don't return error to client since rule was created successfully
-	}
 
 	c.JSON(http.StatusCreated, response)
 }
@@ -824,20 +668,21 @@ func (s *AdminServer) listRules(c *gin.Context) {
 	rules := make([]types.ForwardingRule, len(dbRules))
 	for i, rule := range dbRules {
 		rules[i] = types.ForwardingRule{
-			ID:            rule.ID,
-			GatewayID:     rule.GatewayID,
-			Path:          rule.Path,
-			Targets:       rule.Targets,
-			Methods:       rule.Methods,
-			Headers:       rule.Headers,
-			StripPath:     rule.StripPath,
-			PreserveHost:  rule.PreserveHost,
-			RetryAttempts: rule.RetryAttempts,
-			PluginChain:   rule.PluginChain,
-			Active:        rule.Active,
-			Public:        rule.Public,
-			CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
+			ID:                    rule.ID,
+			GatewayID:             rule.GatewayID,
+			Path:                  rule.Path,
+			Targets:               rule.Targets,
+			Methods:               rule.Methods,
+			Headers:               rule.Headers,
+			StripPath:             rule.StripPath,
+			PreserveHost:          rule.PreserveHost,
+			RetryAttempts:         rule.RetryAttempts,
+			PluginChain:           rule.PluginChain,
+			Active:                rule.Active,
+			Public:                rule.Public,
+			CreatedAt:             rule.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:             rule.UpdatedAt.Format(time.RFC3339),
+			LoadBalancingStrategy: rule.LoadBalancingStrategy,
 		}
 	}
 
@@ -1060,15 +905,6 @@ func (s *AdminServer) deleteAPIKey(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "API key deleted successfully"})
 }
 
-// Add helper function for header conversion
-func convertMapToHeaders(headers map[string]string) []string {
-	var result []string
-	for k, v := range headers {
-		result = append(result, fmt.Sprintf("%s: %s", k, v))
-	}
-	return result
-}
-
 func convertMapToDBHeaders(headers map[string]string) map[string]string {
 	result := make(map[string]string)
 	for k, v := range headers {
@@ -1117,6 +953,12 @@ func (s *AdminServer) validateRule(rule *types.CreateRuleRequest) error {
 
 	if len(rule.Targets) == 0 {
 		return fmt.Errorf("at least one target is required")
+	}
+
+	if rule.LoadBalancingStrategy != "" {
+		if rule.LoadBalancingStrategy != "weighted" && rule.LoadBalancingStrategy != "round_robin" {
+			return fmt.Errorf("invalid load balancing strategy: %s", rule.LoadBalancingStrategy)
+		}
 	}
 
 	// Validate targets

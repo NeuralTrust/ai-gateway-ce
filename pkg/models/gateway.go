@@ -44,24 +44,29 @@ type Credentials struct {
 }
 
 // GatewaySettings is a custom type for handling JSON serialization of gateway settings
-
 type GatewaySettings struct {
 	Traffic   []GatewayTraffic  `json:"traffic"`
 	Providers []GatewayProvider `json:"providers"`
 }
 
+// GatewayTraffic struct
 type GatewayTraffic struct {
 	Provider string `json:"provider"`
 	Weight   int    `json:"weight"`
 }
 
+// GatewayProvider struct
 type GatewayProvider struct {
-	Name                string      `json:"name"`
-	Path                string      `json:"path"`
-	Credentials         Credentials `json:"credentials"`
-	FallbackProvider    string      `json:"fallback_provider,omitempty"`
-	FallbackCredentials Credentials `json:"fallback_credentials,omitempty"`
-	PluginChain         []string    `json:"plugin_chain,omitempty"`
+	Name                string            `json:"name"`
+	Path                string            `json:"path"`
+	StripPath           bool              `json:"strip_path"`
+	Credentials         CredentialsJSON   `json:"credentials"`
+	FallbackProvider    string            `json:"fallback_provider"`
+	FallbackCredentials CredentialsJSON   `json:"fallback_credentials"`
+	PluginChain         []string          `json:"plugin_chain"`
+	AllowedModels       []string          `json:"allowed_models"`
+	FallbackModelMap    map[string]string `json:"fallback_model_map"`
+	Headers             map[string]string `json:"headers"`
 }
 
 // Scan implements the sql.Scanner interface
@@ -113,6 +118,7 @@ func (p *PluginConfigJSON) Scan(value interface{}) error {
 	return json.Unmarshal(bytes, p)
 }
 
+// Gateway represents a gateway in the database
 type Gateway struct {
 	ID              string           `json:"id" gorm:"primaryKey"`
 	Name            string           `json:"name"`
@@ -142,6 +148,11 @@ func (g *Gateway) BeforeCreate(tx *gorm.DB) error {
 	}
 	if g.Subdomain == "" {
 		return fmt.Errorf("gateway subdomain is required")
+	}
+
+	// Validate gateway type
+	if g.Type != "models" && g.Type != "backends" {
+		return fmt.Errorf("invalid gateway type: %s (must be 'models' or 'backends')", g.Type)
 	}
 
 	// Generate ID if not set
@@ -208,6 +219,11 @@ func (g *Gateway) BeforeCreate(tx *gorm.DB) error {
 // BeforeUpdate hook to update timestamps and ensure plugin IDs
 func (g *Gateway) BeforeUpdate(tx *gorm.DB) error {
 	g.UpdatedAt = time.Now()
+
+	// Validate gateway type
+	if g.Type != "models" && g.Type != "backends" {
+		return fmt.Errorf("invalid gateway type: %s (must be 'models' or 'backends')", g.Type)
+	}
 
 	if g.RequiredPlugins == nil {
 		g.RequiredPlugins = []types.PluginConfig{}
@@ -308,6 +324,14 @@ func (g *Gateway) generateProviderRules() {
 				}
 			}
 
+			// Initialize headers map with provider's headers
+			headers := HeadersJSON{}
+			if provider.Headers != nil {
+				for k, v := range provider.Headers {
+					headers[k] = v
+				}
+			}
+
 			rules = append(rules, ForwardingRule{
 				ID:                  uuid.New().String(),
 				GatewayID:           g.ID,
@@ -315,8 +339,8 @@ func (g *Gateway) generateProviderRules() {
 				Targets:             TargetsJSON{{URL: targetURL}},
 				FallbackTargets:     fallbackTargets,
 				Methods:             MethodsJSON{"POST"},
-				Headers:             HeadersJSON{},
-				StripPath:           provider.Path != "",
+				Headers:             headers,
+				StripPath:           provider.StripPath,
 				PreserveHost:        false,
 				RetryAttempts:       3,
 				PluginChain:         PluginChainJSON{},
