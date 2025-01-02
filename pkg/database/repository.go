@@ -215,20 +215,18 @@ func (r *Repository) ListRules(ctx context.Context, gatewayID string) ([]models.
 			rules := make([]models.ForwardingRule, len(apiRules))
 			for i, apiRule := range apiRules {
 				rules[i] = models.ForwardingRule{
-					ID:                    apiRule.ID,
-					GatewayID:             apiRule.GatewayID,
-					Path:                  apiRule.Path,
-					Targets:               models.TargetsJSON(apiRule.Targets),
-					FallbackTargets:       models.TargetsJSON(apiRule.FallbackTargets),
-					Methods:               models.MethodsJSON(apiRule.Methods),
-					Headers:               models.HeadersJSON(apiRule.Headers),
-					StripPath:             apiRule.StripPath,
-					PreserveHost:          apiRule.PreserveHost,
-					RetryAttempts:         apiRule.RetryAttempts,
-					PluginChain:           models.PluginChainJSON(apiRule.PluginChain),
-					Active:                apiRule.Active,
-					Public:                apiRule.Public,
-					LoadBalancingStrategy: apiRule.LoadBalancingStrategy,
+					ID:            apiRule.ID,
+					GatewayID:     apiRule.GatewayID,
+					Path:          apiRule.Path,
+					ServiceID:     apiRule.ServiceID,
+					Methods:       models.MethodsJSON(apiRule.Methods),
+					Headers:       models.HeadersJSON(apiRule.Headers),
+					StripPath:     apiRule.StripPath,
+					PreserveHost:  apiRule.PreserveHost,
+					RetryAttempts: apiRule.RetryAttempts,
+					PluginChain:   models.PluginChainJSON(apiRule.PluginChain),
+					Active:        apiRule.Active,
+					Public:        apiRule.Public,
 				}
 				// Parse timestamps
 				if t, err := time.Parse(time.RFC3339, apiRule.CreatedAt); err == nil {
@@ -400,24 +398,20 @@ func (r *Repository) UpdateRulesCache(ctx context.Context, gatewayID string, rul
 		}
 
 		apiRules[i] = types.ForwardingRule{
-			ID:                    rule.ID,
-			GatewayID:             rule.GatewayID,
-			Path:                  rule.Path,
-			Targets:               rule.Targets,
-			Credentials:           rule.Credentials.ToCredentials(),
-			FallbackTargets:       rule.FallbackTargets,
-			FallbackCredentials:   rule.FallbackCredentials.ToCredentials(),
-			Methods:               rule.Methods,
-			Headers:               rule.Headers,
-			StripPath:             rule.StripPath,
-			PreserveHost:          rule.PreserveHost,
-			RetryAttempts:         rule.RetryAttempts,
-			PluginChain:           rule.PluginChain,
-			Active:                rule.Active,
-			Public:                rule.Public,
-			CreatedAt:             rule.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:             rule.UpdatedAt.Format(time.RFC3339),
-			LoadBalancingStrategy: rule.LoadBalancingStrategy,
+			ID:            rule.ID,
+			GatewayID:     rule.GatewayID,
+			Path:          rule.Path,
+			ServiceID:     rule.ServiceID,
+			Methods:       rule.Methods,
+			Headers:       rule.Headers,
+			StripPath:     rule.StripPath,
+			PreserveHost:  rule.PreserveHost,
+			RetryAttempts: rule.RetryAttempts,
+			PluginChain:   rule.PluginChain,
+			Active:        rule.Active,
+			Public:        rule.Public,
+			CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
 		}
 
 		// Initialize empty maps if nil
@@ -444,4 +438,107 @@ func (r *Repository) UpdateRulesCache(ctx context.Context, gatewayID string, rul
 	}
 
 	return nil
+}
+
+// Upstream methods
+func (r *Repository) CreateUpstream(ctx context.Context, upstream *models.Upstream) error {
+	return r.db.WithContext(ctx).Create(upstream).Error
+}
+
+func (r *Repository) GetUpstream(ctx context.Context, id string) (*models.Upstream, error) {
+	var upstream models.Upstream
+	if err := r.db.WithContext(ctx).First(&upstream, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &upstream, nil
+}
+
+func (r *Repository) ListUpstreams(ctx context.Context, gatewayID string, offset, limit int) ([]models.Upstream, error) {
+	var upstreams []models.Upstream
+	query := r.db.WithContext(ctx).Where("gateway_id = ?", gatewayID)
+
+	if limit > 0 {
+		query = query.Offset(offset).Limit(limit)
+	}
+
+	if err := query.Find(&upstreams).Error; err != nil {
+		return nil, err
+	}
+	return upstreams, nil
+}
+
+func (r *Repository) UpdateUpstream(ctx context.Context, upstream *models.Upstream) error {
+	return r.db.WithContext(ctx).Save(upstream).Error
+}
+
+func (r *Repository) DeleteUpstream(ctx context.Context, id string) error {
+	// First check if the upstream is being used by any services
+	var count int64
+	if err := r.db.WithContext(ctx).Model(&models.Service{}).Where("upstream_id = ?", id).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("upstream is being used by %d services", count)
+	}
+
+	return r.db.WithContext(ctx).Delete(&models.Upstream{}, "id = ?", id).Error
+}
+
+// Service methods
+func (r *Repository) CreateService(ctx context.Context, service *models.Service) error {
+	// Verify upstream exists and belongs to the same gateway
+	var upstream models.Upstream
+	if err := r.db.WithContext(ctx).Where("id = ? AND gateway_id = ?", service.UpstreamID, service.GatewayID).First(&upstream).Error; err != nil {
+		return fmt.Errorf("invalid upstream_id or upstream belongs to different gateway: %w", err)
+	}
+
+	return r.db.WithContext(ctx).Create(service).Error
+}
+
+func (r *Repository) GetService(ctx context.Context, id string) (*models.Service, error) {
+	var service models.Service
+	result := r.db.WithContext(ctx).
+		Preload("Upstream").
+		First(&service, "id = ?", id)
+	if result.Error != nil {
+		return nil, fmt.Errorf("Upstream: %w", result.Error)
+	}
+	return &service, nil
+}
+
+func (r *Repository) ListServices(ctx context.Context, gatewayID string, offset, limit int) ([]models.Service, error) {
+	var services []models.Service
+	query := r.db.WithContext(ctx).Where("gateway_id = ?", gatewayID).Preload("Upstream")
+
+	if limit > 0 {
+		query = query.Offset(offset).Limit(limit)
+	}
+
+	if err := query.Find(&services).Error; err != nil {
+		return nil, err
+	}
+	return services, nil
+}
+
+func (r *Repository) UpdateService(ctx context.Context, service *models.Service) error {
+	// Verify upstream exists and belongs to the same gateway
+	var upstream models.Upstream
+	if err := r.db.WithContext(ctx).Where("id = ? AND gateway_id = ?", service.UpstreamID, service.GatewayID).First(&upstream).Error; err != nil {
+		return fmt.Errorf("invalid upstream_id or upstream belongs to different gateway: %w", err)
+	}
+
+	return r.db.WithContext(ctx).Save(service).Error
+}
+
+func (r *Repository) DeleteService(ctx context.Context, id string) error {
+	// First check if the service is being used by any forwarding rules
+	var count int64
+	if err := r.db.WithContext(ctx).Model(&models.ForwardingRule{}).Where("service_id = ?", id).Count(&count).Error; err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("service is being used by %d forwarding rules", count)
+	}
+
+	return r.db.WithContext(ctx).Delete(&models.Service{}, "id = ?", id).Error
 }

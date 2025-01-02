@@ -13,15 +13,13 @@ SUBDOMAIN="multirate12-$(date +%s)"
 
 echo -e "${GREEN}Testing Rate Limiter${NC}\n"
 
-# 1. Create a gateway with multiple rate limiting types
-echo -e "${GREEN}1. Creating gateway with multiple rate limiting types...${NC}"
+# 1. Create a gateway with rate limiting plugin
+echo -e "${GREEN}1. Creating gateway with rate limiting plugin...${NC}"
 GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Multi Rate Limited Gateway",
     "subdomain": "'$SUBDOMAIN'",
-    "type": "backends",
-    "enabled_plugins": ["rate_limiter"],
     "required_plugins": [
         {
             "name": "rate_limiter",
@@ -69,7 +67,7 @@ API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/keys" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Test Key",
-    "expires_at": "2025-01-01T00:00:00Z"
+    "expires_at": "2026-01-01T00:00:00Z"
 }')
 
 API_KEY=$(echo $API_KEY_RESPONSE | jq -r '.key')
@@ -81,38 +79,91 @@ fi
 
 echo "API Key created: $API_KEY"
 
+# Create upstream
+echo -e "\n${GREEN}3. Creating upstream...${NC}"
+UPSTREAM_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/upstreams" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "httpbin-upstream-'$(date +%s)'",
+    "algorithm": "round-robin",
+    "targets": [{
+        "host": "httpbin.org",
+        "port": 443,
+        "protocol": "https",
+        "weight": 100,
+        "priority": 1
+    }],
+    "health_checks": {
+        "passive": true,
+        "threshold": 3,
+        "interval": 60
+    }
+}')
+
+echo $UPSTREAM_RESPONSE | jq .
+UPSTREAM_ID=$(echo $UPSTREAM_RESPONSE | jq -r '.id')
+
+if [ "$UPSTREAM_ID" == "null" ] || [ -z "$UPSTREAM_ID" ]; then
+    echo -e "${RED}Failed to create upstream. Response: $UPSTREAM_RESPONSE${NC}"
+    exit 1
+fi
+
+echo "Upstream created with ID: $UPSTREAM_ID"
+
+# Create services
+echo -e "\n${GREEN}4. Creating services...${NC}"
+SERVICE1_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/services" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "service-'$(date +%s)'",
+    "type": "upstream",
+    "description": "HTTPBin test service",
+    "upstream_id": "'$UPSTREAM_ID'"
+}')
+
+SERVICE1_ID=$(echo $SERVICE1_RESPONSE | jq -r '.id')
+
+if [ "$SERVICE1_ID" == "null" ] || [ -z "$SERVICE1_ID" ]; then
+    echo -e "${RED}Failed to create service1. Response: $SERVICE1_RESPONSE${NC}"
+    exit 1
+fi
+
+echo "Service1 created with ID: $SERVICE1_ID"
+
 # Create rules for different paths
-echo -e "\n${GREEN}3. Creating rules for different paths...${NC}"
+echo -e "\n${GREEN}5. Creating rules for different paths...${NC}"
 RULE1_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/path1",
-    "targets": [{"url": "https://httpbin.org/get", "weight": 30}, {"url": "https://httpbin.org/anything", "weight": 70}],
+    "service_id": "'$SERVICE1_ID'",
     "methods": ["GET"],
-    "strip_path": true
+    "strip_path": true,
+    "active": true
 }')
 
 RULE2_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/path2",
-    "targets": [{"url": "https://httpbin.org/get", "weight": 30}, {"url": "https://httpbin.org/anything", "weight": 70}],
+    "service_id": "'$SERVICE1_ID'",
     "methods": ["GET"],
-    "strip_path": true
+    "strip_path": true,
+    "active": true
 }')
 
 # Wait for configuration to propagate
 sleep 2
 
 # Test different rate limit types
-echo -e "\n${GREEN}4. Testing different rate limit types...${NC}"
+echo -e "\n${GREEN}6. Testing different rate limit types...${NC}"
 
 # Test IP-based rate limit
-echo -e "\n${GREEN}4.1 Testing IP-based rate limit (limit: 5/min)...${NC}"
+echo -e "\n${GREEN}6.1 Testing IP-based rate limit (limit: 5/min)...${NC}"
 for i in {1..6}; do
     RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path2" \
         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
-        -H "Authorization: Bearer ${API_KEY}" \
+        -H "X-API-Key: ${API_KEY}" \
         -H "X-Real-IP: 192.168.1.1")
     
     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
@@ -129,52 +180,5 @@ for i in {1..6}; do
     fi
     sleep 0.1
 done
-
-# # Test user-based rate limit
-# echo -e "\n${GREEN}4.2 Testing user-based rate limit (limit: 5/min)...${NC}"
-# for i in {1..6}; do
-#     RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path2" \
-#         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
-#         -H "Authorization: Bearer ${API_KEY}" \
-#         -H "X-User-ID: 123" \
-#         -H "X-Real-IP: 192.168.1.2")
-    
-#     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-#     BODY=$(echo "$RESPONSE" | head -n1)
-
-#     if [ "$HTTP_CODE" == "200" ]; then
-#         echo -e "${GREEN}User-based Request $i: Success${NC}"
-#     elif [ "$HTTP_CODE" == "429" ]; then
-#         echo -e "${RED}User-based Request $i: Rate Limited (Expected after 5 requests)${NC}"
-#         echo "Response: $BODY"
-#     else
-#         echo -e "${RED}User-based Request $i: Unexpected status code: $HTTP_CODE${NC}"
-#         echo "Response: $BODY"
-#     fi
-#     sleep 0.1
-# done
-
-# # Test global rate limit
-# echo -e "\n${GREEN}4.3 Testing global rate limit (limit: 10/min)...${NC}"
-# for i in {1..11}; do
-#     RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/path1" \
-#         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
-#         -H "Authorization: Bearer ${API_KEY}" \
-#         -H "X-Real-IP: 192.168.1.$((i + 2))")
-    
-#     HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
-#     BODY=$(echo "$RESPONSE" | head -n1)
-    
-#     if [ "$HTTP_CODE" == "200" ]; then
-#         echo -e "${GREEN}Global Request $i: Success${NC}"
-#     elif [ "$HTTP_CODE" == "429" ]; then
-#         echo -e "${RED}Global Request $i: Rate Limited (Expected after 10 requests)${NC}"
-#         echo "Response: $BODY"
-#     else
-#         echo -e "${RED}Global Request $i: Unexpected status code: $HTTP_CODE${NC}"
-#         echo "Response: $BODY"
-#     fi
-#     sleep 0.1
-# done
 
 echo -e "\n${GREEN}Rate limiter tests completed${NC}" 

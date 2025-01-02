@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -95,7 +94,27 @@ func (s *AdminServer) addBaseRoutes(router *gin.RouterGroup) {
 			gateways.PUT("/:gateway_id", s.updateGateway)
 			gateways.DELETE("/:gateway_id", s.handleDeleteGateway)
 
-			// Rules management
+			// Upstream management (scoped to gateway)
+			upstreams := gateways.Group("/:gateway_id/upstreams")
+			{
+				upstreams.POST("", s.createUpstream)
+				upstreams.GET("", s.listUpstreams)
+				upstreams.GET("/:upstream_id", s.getUpstream)
+				upstreams.PUT("/:upstream_id", s.updateUpstream)
+				upstreams.DELETE("/:upstream_id", s.deleteUpstream)
+			}
+
+			// Service management (scoped to gateway)
+			services := gateways.Group("/:gateway_id/services")
+			{
+				services.POST("", s.createService)
+				services.GET("", s.listServices)
+				services.GET("/:service_id", s.getService)
+				services.PUT("/:service_id", s.updateService)
+				services.DELETE("/:service_id", s.deleteService)
+			}
+
+			// Rules management (already scoped to gateway)
 			rules := gateways.Group("/:gateway_id/rules")
 			{
 				rules.GET("", s.listRules)
@@ -561,22 +580,20 @@ func (s *AdminServer) getRuleResponse(rule *models.ForwardingRule) types.Forward
 	}
 
 	return types.ForwardingRule{
-		ID:                    rule.ID,
-		GatewayID:             rule.GatewayID,
-		Path:                  rule.Path,
-		Targets:               rule.Targets,
-		FallbackTargets:       rule.FallbackTargets,
-		Methods:               []string(rule.Methods),
-		Headers:               headers,
-		StripPath:             rule.StripPath,
-		PreserveHost:          rule.PreserveHost,
-		RetryAttempts:         rule.RetryAttempts,
-		PluginChain:           pluginChain,
-		Active:                rule.Active,
-		Public:                rule.Public,
-		CreatedAt:             rule.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:             rule.UpdatedAt.Format(time.RFC3339),
-		LoadBalancingStrategy: rule.LoadBalancingStrategy,
+		ID:            rule.ID,
+		GatewayID:     rule.GatewayID,
+		Path:          rule.Path,
+		ServiceID:     rule.ServiceID,
+		Methods:       []string(rule.Methods),
+		Headers:       headers,
+		StripPath:     rule.StripPath,
+		PreserveHost:  rule.PreserveHost,
+		RetryAttempts: rule.RetryAttempts,
+		PluginChain:   pluginChain,
+		Active:        rule.Active,
+		Public:        rule.Public,
+		CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -586,12 +603,14 @@ func (s *AdminServer) createRule(c *gin.Context) {
 
 	var req types.CreateRuleRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		s.logger.WithError(err).Error("Failed to bind request")
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	// Validate the rule request
 	if err := s.validateRule(&req); err != nil {
+		s.logger.WithError(err).Error("Failed to validate rule")
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -620,24 +639,20 @@ func (s *AdminServer) createRule(c *gin.Context) {
 
 	// Create the database model
 	dbRule := &models.ForwardingRule{
-		ID:                    uuid.NewString(),
-		GatewayID:             gatewayID,
-		Path:                  req.Path,
-		Targets:               models.TargetsJSON(req.Targets),
-		FallbackTargets:       models.TargetsJSON(req.FallbackTargets),
-		Methods:               req.Methods,
-		Headers:               models.HeadersJSON(req.Headers),
-		StripPath:             stripPath,
-		PreserveHost:          preserveHost,
-		RetryAttempts:         retryAttempts,
-		PluginChain:           req.PluginChain,
-		Active:                true,
-		Public:                false,
-		CreatedAt:             time.Now(),
-		UpdatedAt:             time.Now(),
-		Credentials:           models.FromCredentials(req.Credentials),
-		FallbackCredentials:   models.FromCredentials(req.FallbackCredentials),
-		LoadBalancingStrategy: req.LoadBalancingStrategy,
+		ID:            uuid.NewString(),
+		GatewayID:     gatewayID,
+		Path:          req.Path,
+		ServiceID:     req.ServiceID,
+		Methods:       req.Methods,
+		Headers:       models.HeadersJSON(req.Headers),
+		StripPath:     stripPath,
+		PreserveHost:  preserveHost,
+		RetryAttempts: retryAttempts,
+		PluginChain:   req.PluginChain,
+		Active:        true,
+		Public:        false,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
 	}
 
 	// Store in database
@@ -668,21 +683,20 @@ func (s *AdminServer) listRules(c *gin.Context) {
 	rules := make([]types.ForwardingRule, len(dbRules))
 	for i, rule := range dbRules {
 		rules[i] = types.ForwardingRule{
-			ID:                    rule.ID,
-			GatewayID:             rule.GatewayID,
-			Path:                  rule.Path,
-			Targets:               rule.Targets,
-			Methods:               rule.Methods,
-			Headers:               rule.Headers,
-			StripPath:             rule.StripPath,
-			PreserveHost:          rule.PreserveHost,
-			RetryAttempts:         rule.RetryAttempts,
-			PluginChain:           rule.PluginChain,
-			Active:                rule.Active,
-			Public:                rule.Public,
-			CreatedAt:             rule.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:             rule.UpdatedAt.Format(time.RFC3339),
-			LoadBalancingStrategy: rule.LoadBalancingStrategy,
+			ID:            rule.ID,
+			GatewayID:     rule.GatewayID,
+			Path:          rule.Path,
+			ServiceID:     rule.ServiceID,
+			Methods:       rule.Methods,
+			Headers:       rule.Headers,
+			StripPath:     rule.StripPath,
+			PreserveHost:  rule.PreserveHost,
+			RetryAttempts: rule.RetryAttempts,
+			PluginChain:   rule.PluginChain,
+			Active:        rule.Active,
+			Public:        rule.Public,
+			CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
 		}
 	}
 
@@ -712,7 +726,7 @@ func (s *AdminServer) updateRule(c *gin.Context) {
 	// Convert UpdateRuleRequest to CreateRuleRequest for validation
 	validateReq := types.CreateRuleRequest{
 		Path:          req.Path,
-		Targets:       req.Targets,
+		ServiceID:     req.ServiceID,
 		Methods:       req.Methods,
 		Headers:       req.Headers,
 		StripPath:     req.StripPath,
@@ -750,9 +764,6 @@ func (s *AdminServer) updateRule(c *gin.Context) {
 		if rule.ID == ruleID {
 			if req.Path != "" {
 				rules[i].Path = req.Path
-			}
-			if req.Targets != nil {
-				rules[i].Targets = req.Targets
 			}
 			if len(req.Methods) > 0 {
 				rules[i].Methods = pq.StringArray(req.Methods)
@@ -951,38 +962,8 @@ func (s *AdminServer) validateRule(rule *types.CreateRuleRequest) error {
 		return fmt.Errorf("at least one method is required")
 	}
 
-	if len(rule.Targets) == 0 {
-		return fmt.Errorf("at least one target is required")
-	}
-
-	if rule.LoadBalancingStrategy != "" {
-		if rule.LoadBalancingStrategy != "weighted" && rule.LoadBalancingStrategy != "round_robin" {
-			return fmt.Errorf("invalid load balancing strategy: %s", rule.LoadBalancingStrategy)
-		}
-	}
-
-	// Validate targets
-	totalWeight := 0
-	hasWeights := false
-	for i, target := range rule.Targets {
-		if target.URL == "" {
-			return fmt.Errorf("target %d: URL is required", i)
-		}
-
-		// Validate URL format
-		if _, err := url.Parse(target.URL); err != nil {
-			return fmt.Errorf("target %d: invalid URL format: %v", i, err)
-		}
-
-		if target.Weight > 0 {
-			hasWeights = true
-			totalWeight += target.Weight
-		}
-	}
-
-	// If any target has weight, all must have weights summing to 100
-	if hasWeights && totalWeight != 100 {
-		return fmt.Errorf("when using weighted distribution, weights must sum to 100 (got %d)", totalWeight)
+	if rule.ServiceID == "" {
+		return fmt.Errorf("service_id is required")
 	}
 
 	// Validate methods
@@ -1050,4 +1031,382 @@ func (s *AdminServer) validatePlugin(plugin types.PluginConfig) error {
 		return fmt.Errorf("unknown plugin: %s", plugin.Name)
 	}
 	return nil
+}
+
+// Upstream handlers with caching
+func (s *AdminServer) createUpstream(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+
+	var upstream models.Upstream
+	if err := c.ShouldBindJSON(&upstream); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	upstream.GatewayID = gatewayID
+
+	if err := s.repo.CreateUpstream(c.Request.Context(), &upstream); err != nil {
+		s.logger.WithError(err).Error("Failed to create upstream")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Cache the upstream
+	if err := s.cache.SaveUpstream(c.Request.Context(), gatewayID, &upstream); err != nil {
+		s.logger.WithError(err).Error("Failed to cache upstream")
+	}
+
+	c.JSON(http.StatusCreated, upstream)
+}
+
+func (s *AdminServer) listUpstreams(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+	offset := 0
+	limit := 10
+
+	if offsetStr := c.Query("offset"); offsetStr != "" {
+		if val, err := strconv.Atoi(offsetStr); err == nil {
+			offset = val
+		}
+	}
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if val, err := strconv.Atoi(limitStr); err == nil && val > 0 && val <= 100 {
+			limit = val
+		}
+	}
+
+	// Try to get from cache first
+	upstreamsKey := fmt.Sprintf(cache.UpstreamsKeyPattern, gatewayID)
+	if upstreamsJSON, err := s.cache.Get(c.Request.Context(), upstreamsKey); err == nil {
+		var upstreams []models.Upstream
+		if err := json.Unmarshal([]byte(upstreamsJSON), &upstreams); err == nil {
+			c.JSON(http.StatusOK, upstreams)
+			return
+		}
+	}
+
+	// If not in cache, get from database
+	upstreams, err := s.repo.ListUpstreams(c.Request.Context(), gatewayID, offset, limit)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to list upstreams")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Cache the results
+	if upstreamsJSON, err := json.Marshal(upstreams); err == nil {
+		if err := s.cache.Set(c.Request.Context(), upstreamsKey, string(upstreamsJSON), 0); err != nil {
+			s.logger.WithError(err).Error("Failed to cache upstreams list")
+		}
+	}
+
+	c.JSON(http.StatusOK, upstreams)
+}
+
+func (s *AdminServer) getUpstream(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+	upstreamID := c.Param("upstream_id")
+
+	// Try to get from cache first
+	upstreamKey := fmt.Sprintf(cache.UpstreamKeyPattern, gatewayID, upstreamID)
+	if upstreamJSON, err := s.cache.Get(c.Request.Context(), upstreamKey); err == nil {
+		var upstream models.Upstream
+		if err := json.Unmarshal([]byte(upstreamJSON), &upstream); err == nil {
+			c.JSON(http.StatusOK, upstream)
+			return
+		}
+	}
+
+	// If not in cache, get from database
+	upstream, err := s.repo.GetUpstream(c.Request.Context(), upstreamID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Upstream not found"})
+		return
+	}
+
+	// Cache the upstream
+	if err := s.cache.SaveUpstream(c.Request.Context(), gatewayID, upstream); err != nil {
+		s.logger.WithError(err).Error("Failed to cache upstream")
+	}
+
+	c.JSON(http.StatusOK, upstream)
+}
+
+func (s *AdminServer) updateUpstream(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+	upstreamID := c.Param("upstream_id")
+
+	var upstream models.Upstream
+	if err := c.ShouldBindJSON(&upstream); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Ensure IDs match
+	upstream.ID = upstreamID
+	upstream.GatewayID = gatewayID
+
+	if err := s.repo.UpdateUpstream(c.Request.Context(), &upstream); err != nil {
+		s.logger.WithError(err).Error("Failed to update upstream")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Cache the updated upstream
+	if err := s.cache.SaveUpstream(c.Request.Context(), gatewayID, &upstream); err != nil {
+		s.logger.WithError(err).Error("Failed to cache upstream")
+	}
+
+	c.JSON(http.StatusOK, upstream)
+}
+
+func (s *AdminServer) deleteUpstream(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+	upstreamID := c.Param("upstream_id")
+
+	if err := s.repo.DeleteUpstream(c.Request.Context(), upstreamID); err != nil {
+		if strings.Contains(err.Error(), "being used by") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		s.logger.WithError(err).Error("Failed to delete upstream")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Invalidate cache
+	upstreamKey := fmt.Sprintf(cache.UpstreamKeyPattern, gatewayID, upstreamID)
+	upstreamsKey := fmt.Sprintf(cache.UpstreamsKeyPattern, gatewayID)
+	if err := s.cache.Delete(c.Request.Context(), upstreamKey); err != nil {
+		s.logger.WithError(err).Error("Failed to invalidate upstream cache")
+	}
+	if err := s.cache.Delete(c.Request.Context(), upstreamsKey); err != nil {
+		s.logger.WithError(err).Error("Failed to invalidate upstreams list cache")
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// Service handlers with caching
+func (s *AdminServer) createService(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+
+	var service models.Service
+	if err := c.ShouldBindJSON(&service); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	service.GatewayID = gatewayID
+
+	if err := s.repo.CreateService(c.Request.Context(), &service); err != nil {
+		s.logger.WithError(err).Error("Failed to create service")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Cache the service
+	if err := s.cache.SaveService(c.Request.Context(), gatewayID, &service); err != nil {
+		s.logger.WithError(err).Error("Failed to cache service")
+	}
+
+	c.JSON(http.StatusCreated, service)
+}
+
+// Update forwarding rule handler to work with services
+func (s *AdminServer) createForwardingRule(c *gin.Context) {
+	gatewayID := c.Param("id")
+	var rule models.ForwardingRule
+
+	if err := c.ShouldBindJSON(&rule); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Verify gateway exists
+	if _, err := s.repo.GetGateway(c.Request.Context(), gatewayID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Gateway not found"})
+		return
+	}
+
+	// Verify service exists
+	if _, err := s.repo.GetService(c.Request.Context(), rule.ServiceID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid service_id"})
+		return
+	}
+
+	rule.GatewayID = gatewayID
+
+	if err := s.repo.CreateRule(c.Request.Context(), &rule); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Update cache if needed
+	if err := s.updateRulesCache(c.Request.Context(), gatewayID); err != nil {
+		s.logger.Error("Failed to update rules cache", "error", err)
+	}
+
+	c.JSON(http.StatusCreated, rule)
+}
+
+// Helper function to update rules cache
+func (s *AdminServer) updateRulesCache(ctx context.Context, gatewayID string) error {
+	rules, err := s.repo.ListRules(ctx, gatewayID)
+	if err != nil {
+		return err
+	}
+
+	// Convert to API types
+	apiRules := make([]types.ForwardingRule, len(rules))
+	for i, rule := range rules {
+		apiRules[i] = convertToAPIRule(rule)
+	}
+
+	return s.repo.UpdateRulesCache(ctx, gatewayID, rules)
+}
+
+func (s *AdminServer) listServices(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+	offset := 0
+	limit := 10
+
+	if offsetStr := c.Query("offset"); offsetStr != "" {
+		if val, err := strconv.Atoi(offsetStr); err == nil {
+			offset = val
+		}
+	}
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if val, err := strconv.Atoi(limitStr); err == nil && val > 0 && val <= 100 {
+			limit = val
+		}
+	}
+
+	services, err := s.repo.ListServices(c.Request.Context(), gatewayID, offset, limit)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to list services")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, services)
+}
+
+func (s *AdminServer) getService(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+	serviceID := c.Param("service_id")
+
+	// Try to get from cache first
+	serviceKey := fmt.Sprintf(cache.ServiceKeyPattern, gatewayID, serviceID)
+	if serviceJSON, err := s.cache.Get(c.Request.Context(), serviceKey); err == nil {
+		var service models.Service
+		if err := json.Unmarshal([]byte(serviceJSON), &service); err == nil {
+			c.JSON(http.StatusOK, service)
+			return
+		}
+	}
+
+	// If not in cache, get from database
+	service, err := s.repo.GetService(c.Request.Context(), serviceID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Service not found"})
+		return
+	}
+
+	// Cache the service
+	if err := s.cache.SaveService(c.Request.Context(), gatewayID, service); err != nil {
+		s.logger.WithError(err).Error("Failed to cache service")
+	}
+
+	c.JSON(http.StatusOK, service)
+}
+
+func (s *AdminServer) updateService(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+	serviceID := c.Param("service_id")
+
+	var service models.Service
+	if err := c.ShouldBindJSON(&service); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Ensure IDs match
+	service.ID = serviceID
+	service.GatewayID = gatewayID
+
+	if err := s.repo.UpdateService(c.Request.Context(), &service); err != nil {
+		s.logger.WithError(err).Error("Failed to update service")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Cache the updated service
+	if err := s.cache.SaveService(c.Request.Context(), gatewayID, &service); err != nil {
+		s.logger.WithError(err).Error("Failed to cache service")
+	}
+
+	c.JSON(http.StatusOK, service)
+}
+
+func (s *AdminServer) deleteService(c *gin.Context) {
+	gatewayID := c.Param("gateway_id")
+	serviceID := c.Param("service_id")
+
+	if err := s.repo.DeleteService(c.Request.Context(), serviceID); err != nil {
+		if strings.Contains(err.Error(), "being used by") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		s.logger.WithError(err).Error("Failed to delete service")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Invalidate cache
+	serviceKey := fmt.Sprintf(cache.ServiceKeyPattern, gatewayID, serviceID)
+	servicesKey := fmt.Sprintf(cache.ServicesKeyPattern, gatewayID)
+	if err := s.cache.Delete(c.Request.Context(), serviceKey); err != nil {
+		s.logger.WithError(err).Error("Failed to invalidate service cache")
+	}
+	if err := s.cache.Delete(c.Request.Context(), servicesKey); err != nil {
+		s.logger.WithError(err).Error("Failed to invalidate services list cache")
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// Add cache invalidation when deleting resources
+func (s *AdminServer) invalidateGatewayCache(ctx context.Context, gatewayID string) {
+	keys := []string{
+		fmt.Sprintf(cache.GatewayKeyPattern, gatewayID),
+		fmt.Sprintf(cache.RulesKeyPattern, gatewayID),
+		fmt.Sprintf(cache.UpstreamsKeyPattern, gatewayID),
+		fmt.Sprintf(cache.ServicesKeyPattern, gatewayID),
+	}
+
+	for _, key := range keys {
+		if err := s.cache.Delete(ctx, key); err != nil {
+			s.logger.WithError(err).WithField("key", key).Error("Failed to invalidate cache")
+		}
+	}
+
+	// Publish cache invalidation event for other instances
+	s.publishCacheInvalidation(ctx, gatewayID)
+}
+
+func convertToAPIRule(rule models.ForwardingRule) types.ForwardingRule {
+	return types.ForwardingRule{
+		ID:        rule.ID,
+		GatewayID: rule.GatewayID,
+		ServiceID: rule.ServiceID,
+		Path:      rule.Path,
+		Methods:   rule.Methods,
+		Headers:   rule.Headers,
+		StripPath: rule.StripPath,
+		Active:    rule.Active,
+		Public:    rule.Public,
+		CreatedAt: rule.CreatedAt.Format(time.RFC3339),
+		UpdatedAt: rule.UpdatedAt.Format(time.RFC3339),
+	}
 }

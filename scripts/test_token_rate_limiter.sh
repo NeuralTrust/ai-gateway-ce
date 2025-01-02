@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration
-ADMIN_URL="http://localhost:8080"
+ADMIN_URL="http://localhost:8080/api/v1"
 PROXY_URL="http://localhost:8081"
 TIMESTAMP=$(date +%s)
 BASE_DOMAIN=${BASE_DOMAIN:-"example.com"}
@@ -43,29 +43,11 @@ fi
 print_header "Creating Gateway with Token Rate Limiter"
 
 # Create gateway with token rate limiter plugin
-GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/api/v1/gateways" \
+GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "Token Rate Limiter Example",
     "subdomain": "'$SUBDOMAIN'",
-    "type": "models",
-    "settings": {
-      "traffic": [
-        {"provider": "openai", "weight": 100}
-      ],
-      "providers": [
-        {
-          "name": "openai",
-          "path": "/v1",
-          "strip_path": false,
-          "plugin_chain": ["token_rate_limiter"],
-          "credentials": {
-            "header_name": "Authorization",
-            "header_value": "Bearer '$OPENAI_API_KEY'"
-          }
-        }
-      ]
-    },
     "required_plugins": [
       {
         "name": "token_rate_limiter",
@@ -90,9 +72,64 @@ fi
 
 echo -e "${GREEN}Gateway created with ID: $GATEWAY_ID${NC}"
 
+# Create upstream for OpenAI
+print_header "Creating Upstream"
+UPSTREAM_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/upstreams" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "openai-upstream-'$(date +%s)'",
+    "algorithm": "round-robin",
+    "targets": [{
+        "provider": "openai",
+        "path": "/v1/chat/completions",
+        "credentials": {
+            "header_name": "Authorization",
+            "header_value": "Bearer '$OPENAI_API_KEY'"
+        },
+        "models": ["gpt-4o-mini"]
+    }],
+    "health_checks": {
+        "passive": true,
+        "threshold": 3,
+        "interval": 60
+    }
+}')
+
+UPSTREAM_ID=$(echo $UPSTREAM_RESPONSE | jq -r '.id')
+
+if [ -z "$UPSTREAM_ID" ] || [ "$UPSTREAM_ID" == "null" ]; then
+    echo -e "${RED}Failed to create upstream${NC}"
+    echo $UPSTREAM_RESPONSE
+    exit 1
+fi
+
+echo -e "${GREEN}Upstream created with ID: $UPSTREAM_ID${NC}"
+
+# Create service
+print_header "Creating Service"
+SERVICE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/services" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "openai-service-'$(date +%s)'",
+    "type": "upstream",
+    "description": "OpenAI API Service",
+    "upstream_id": "'$UPSTREAM_ID'",
+    "retries": 3
+}')
+
+SERVICE_ID=$(echo $SERVICE_RESPONSE | jq -r '.id')
+
+if [ -z "$SERVICE_ID" ] || [ "$SERVICE_ID" == "null" ]; then
+    echo -e "${RED}Failed to create service${NC}"
+    echo $SERVICE_RESPONSE
+    exit 1
+fi
+
+echo -e "${GREEN}Service created with ID: $SERVICE_ID${NC}"
+
 # Create API key
 print_header "Creating API Key"
-API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/api/v1/gateways/$GATEWAY_ID/keys" \
+API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/keys" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "test-key",
@@ -108,6 +145,18 @@ if [ -z "$API_KEY" ] || [ "$API_KEY" == "null" ]; then
 fi
 
 echo -e "${GREEN}API key created: $API_KEY${NC}"
+
+# Create rule
+print_header "Creating Rule"
+RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/v1",
+    "service_id": "'$SERVICE_ID'",
+    "methods": ["POST"],
+    "strip_path": false,
+    "active": true
+}')
 
 # Wait for gateway to be ready
 echo "Waiting for gateway to be ready..."
@@ -164,7 +213,6 @@ make_chat_request() {
 }
 
 # Test Sequence
-
 # Request 1: Short message
 make_chat_request "Hello, how are you?" "Request 1: Short Message"
 

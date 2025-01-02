@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"gorm.io/gorm"
 
 	"ai-gateway-ce/pkg/common"
+	"ai-gateway-ce/pkg/models"
 )
 
 // Cache implements the common.Cache interface
@@ -20,6 +22,19 @@ type Cache struct {
 	ttlMaps    sync.Map
 	ttl        time.Duration
 }
+
+// Add new cache key patterns
+const (
+	// Existing patterns
+	GatewayKeyPattern = "gateway:%s"
+	RulesKeyPattern   = "rules:%s"
+
+	// New patterns
+	UpstreamsKeyPattern = "gateway:%s:upstreams"   // List of upstreams for a gateway
+	UpstreamKeyPattern  = "gateway:%s:upstream:%s" // Single upstream
+	ServicesKeyPattern  = "gateway:%s:services"    // List of services for a gateway
+	ServiceKeyPattern   = "gateway:%s:service:%s"  // Single service
+)
 
 func NewCache(config common.CacheConfig, db *gorm.DB) (*Cache, error) {
 	client := redis.NewClient(&redis.Options{
@@ -74,4 +89,37 @@ func (c *Cache) GetTTLMap(name string) *common.TTLMap {
 		return value.(*common.TTLMap)
 	}
 	return nil
+}
+
+// Add new cache methods
+func (c *Cache) SaveUpstream(ctx context.Context, gatewayID string, upstream *models.Upstream) error {
+	// Cache individual upstream
+	upstreamKey := fmt.Sprintf(UpstreamKeyPattern, gatewayID, upstream.ID)
+	upstreamJSON, err := json.Marshal(upstream)
+	if err != nil {
+		return err
+	}
+	if err := c.Set(ctx, upstreamKey, string(upstreamJSON), 0); err != nil {
+		return err
+	}
+
+	// Invalidate upstreams list cache
+	upstreamsKey := fmt.Sprintf(UpstreamsKeyPattern, gatewayID)
+	return c.Delete(ctx, upstreamsKey)
+}
+
+func (c *Cache) SaveService(ctx context.Context, gatewayID string, service *models.Service) error {
+	// Cache individual service
+	serviceKey := fmt.Sprintf(ServiceKeyPattern, gatewayID, service.ID)
+	serviceJSON, err := json.Marshal(service)
+	if err != nil {
+		return err
+	}
+	if err := c.Set(ctx, serviceKey, string(serviceJSON), 0); err != nil {
+		return err
+	}
+
+	// Invalidate services list cache
+	servicesKey := fmt.Sprintf(ServicesKeyPattern, gatewayID)
+	return c.Delete(ctx, servicesKey)
 }

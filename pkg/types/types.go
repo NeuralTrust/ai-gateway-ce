@@ -20,33 +20,26 @@ type CreateAPIKeyRequest struct {
 }
 
 type CreateRuleRequest struct {
-	Path                  string            `json:"path" binding:"required"`
-	Targets               []Target          `json:"targets" binding:"required"`
-	Credentials           *Credentials      `json:"credentials"`
-	FallbackTargets       []Target          `json:"fallback_targets,omitempty"`
-	FallbackCredentials   *Credentials      `json:"fallback_credentials,omitempty"`
-	Methods               []string          `json:"methods"`
-	Headers               map[string]string `json:"headers"`
-	StripPath             *bool             `json:"strip_path"`
-	PreserveHost          *bool             `json:"preserve_host"`
-	RetryAttempts         *int              `json:"retry_attempts"`
-	PluginChain           []PluginConfig    `json:"plugin_chain"`
-	LoadBalancingStrategy string            `json:"load_balancing_strategy"`
+	Path          string            `json:"path" binding:"required"`
+	ServiceID     string            `json:"service_id" binding:"required"`
+	Methods       []string          `json:"methods"`
+	Headers       map[string]string `json:"headers"`
+	StripPath     *bool             `json:"strip_path"`
+	PreserveHost  *bool             `json:"preserve_host"`
+	RetryAttempts *int              `json:"retry_attempts"`
+	PluginChain   []PluginConfig    `json:"plugin_chain"`
 }
 
 type UpdateRuleRequest struct {
-	Path                string            `json:"path"`
-	Targets             []Target          `json:"targets"`
-	Credentials         *Credentials      `json:"credentials"`
-	FallbackTargets     []Target          `json:"fallback_targets"`
-	FallbackCredentials *Credentials      `json:"fallback_credentials"`
-	Methods             []string          `json:"methods"`
-	Headers             map[string]string `json:"headers"`
-	StripPath           *bool             `json:"strip_path"`
-	PreserveHost        *bool             `json:"preserve_host"`
-	RetryAttempts       *int              `json:"retry_attempts"`
-	Active              *bool             `json:"active"`
-	PluginChain         []PluginConfig    `json:"plugin_chain"`
+	Path          string            `json:"path"`
+	ServiceID     string            `json:"service_id"`
+	Methods       []string          `json:"methods"`
+	Headers       map[string]string `json:"headers"`
+	StripPath     *bool             `json:"strip_path"`
+	PreserveHost  *bool             `json:"preserve_host"`
+	RetryAttempts *int              `json:"retry_attempts"`
+	Active        *bool             `json:"active"`
+	PluginChain   []PluginConfig    `json:"plugin_chain"`
 }
 
 // EvaluateCondition evaluates a response condition against a value

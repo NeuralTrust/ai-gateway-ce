@@ -19,8 +19,7 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
   -d '{
     "name": "Parallel Test Company",
     "subdomain": "parallel-29",
-    "tier": "pro",
-    "enabled_plugins": ["rate_limiter", "external_api"]
+    "type": "backends"
   }')
 
 # Extract fields from response
@@ -35,7 +34,8 @@ echo -e "\n${GREEN}2. Creating API key...${NC}"
 API_KEY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/keys" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Test Key"
+    "name": "Test Key",
+    "expires_at": "2026-01-01T00:00:00Z"
 }')
 
 API_KEY=$(echo $API_KEY_RESPONSE | jq -r '.key')

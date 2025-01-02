@@ -39,6 +39,9 @@ func NewDB(cfg *Config) (*DB, error) {
 		&models.Gateway{},
 		&models.ForwardingRule{},
 		&models.APIKey{},
+		&models.Service{},
+		&models.Upstream{},
+		&models.HealthCheck{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to auto-migrate schema: %w", err)
 	}
@@ -53,33 +56,4 @@ func (db *DB) Close() error {
 		return err
 	}
 	return sqlDB.Close()
-}
-
-// GetGateway retrieves a gateway by ID
-func (db *DB) GetGateway(id uint) (*models.Gateway, error) {
-	var gateway models.Gateway
-	if err := db.First(&gateway, id).Error; err != nil {
-		return nil, err
-	}
-	return &gateway, nil
-}
-
-// GetRule retrieves a rule by ID
-func (db *DB) GetRule(id uint) (*models.ForwardingRule, error) {
-	var rule models.ForwardingRule
-	if err := db.First(&rule, id).Error; err != nil {
-		return nil, err
-	}
-	return &rule, nil
-}
-
-// FindMatchingRule finds a rule matching the request path
-func (db *DB) FindMatchingRule(gatewayID uint, path string) (*models.ForwardingRule, error) {
-	var rule models.ForwardingRule
-	if err := db.Where("gateway_id = ? AND path = ? AND is_active = true", gatewayID, path).
-		Order("priority DESC").
-		First(&rule).Error; err != nil {
-		return nil, err
-	}
-	return &rule, nil
 }
