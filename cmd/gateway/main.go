@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
-	"github.com/spf13/viper"
 
 	"ai-gateway-ce/pkg/cache"
 	"ai-gateway-ce/pkg/common"
@@ -17,28 +16,6 @@ import (
 	"ai-gateway-ce/pkg/database"
 	"ai-gateway-ce/pkg/server"
 )
-
-type AppConfig struct {
-	Server struct {
-		AdminPort  int    `mapstructure:"admin_port"`
-		ProxyPort  int    `mapstructure:"proxy_port"`
-		BaseDomain string `mapstructure:"base_domain"`
-	} `mapstructure:"server"`
-	Redis struct {
-		Host     string `mapstructure:"host"`
-		Port     int    `mapstructure:"port"`
-		Password string `mapstructure:"password"`
-		DB       int    `mapstructure:"db"`
-	} `mapstructure:"redis"`
-	Database struct {
-		Host     string `mapstructure:"host"`
-		Port     int    `mapstructure:"port"`
-		User     string `mapstructure:"user"`
-		Password string `mapstructure:"password"`
-		Name     string `mapstructure:"name"`
-		SSLMode  string `mapstructure:"ssl_mode"`
-	} `mapstructure:"database"`
-}
 
 // syncWriter wraps a buffered writer and ensures each write is flushed
 type syncWriter struct {
@@ -146,19 +123,19 @@ func main() {
 	}
 
 	// Load configuration
-	config, err := loadConfig()
-	if err != nil {
+	if err := config.Load(); err != nil {
 		logger.Fatalf("Failed to load config: %v", err)
 	}
+	cfg := config.GetConfig()
 
 	// Initialize database
 	db, err := database.NewDB(&database.Config{
-		Host:     config.Database.Host,
-		Port:     config.Database.Port,
-		User:     config.Database.User,
-		Password: config.Database.Password,
-		DBName:   config.Database.DBName,
-		SSLMode:  config.Database.SSLMode,
+		Host:     cfg.Database.Host,
+		Port:     cfg.Database.Port,
+		User:     cfg.Database.User,
+		Password: cfg.Database.Password,
+		DBName:   cfg.Database.DBName,
+		SSLMode:  cfg.Database.SSLMode,
 	})
 	if err != nil {
 		logger.Fatalf("Failed to initialize database: %v", err)
@@ -167,10 +144,10 @@ func main() {
 
 	// Initialize cache with the database's GORM instance
 	cacheConfig := common.CacheConfig{
-		Host:     config.Redis.Host,
-		Port:     config.Redis.Port,
-		Password: config.Redis.Password,
-		DB:       config.Redis.DB,
+		Host:     cfg.Redis.Host,
+		Port:     cfg.Redis.Port,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
 	}
 	cacheInstance, err := cache.NewCache(cacheConfig, db.DB)
 	if err != nil {
@@ -183,10 +160,10 @@ func main() {
 	var srv server.Server
 	switch serverType {
 	case "admin":
-		srv = server.NewAdminServer(config, cacheInstance, repo, logger)
+		srv = server.NewAdminServer(cfg, cacheInstance, repo, logger)
 	case "proxy":
 		srv = server.NewProxyServer(
-			config,
+			cfg,
 			cacheInstance,
 			repo,
 			logger,
@@ -199,22 +176,4 @@ func main() {
 	if err := srv.Run(); err != nil {
 		logger.Fatalf("Server failed: %v", err)
 	}
-}
-
-func loadConfig() (*config.Config, error) {
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(".")
-	viper.AddConfigPath("./config")
-
-	if err := viper.ReadInConfig(); err != nil {
-		return nil, err
-	}
-
-	var config config.Config
-	if err := viper.Unmarshal(&config); err != nil {
-		return nil, err
-	}
-
-	return &config, nil
 }

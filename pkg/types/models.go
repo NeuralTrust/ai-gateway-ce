@@ -1,6 +1,7 @@
 package types
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -42,18 +43,26 @@ type HealthStatus struct {
 }
 
 type UpstreamTarget struct {
-	ID          string
-	Weight      int
-	Priority    int
-	Host        string
-	Port        int
-	Protocol    string
-	Provider    string
-	Models      []string
-	Credentials Credentials
-	Headers     map[string]string
-	Path        string
-	Health      *HealthStatus
+	ID           string            `json:"id"`
+	Weight       int               `json:"weight"`
+	Priority     int               `json:"priority"`
+	Host         string            `json:"host"`
+	Port         int               `json:"port"`
+	Protocol     string            `json:"protocol"`
+	Provider     string            `json:"provider"`
+	Models       []string          `json:"models"`
+	DefaultModel string            `json:"default_model"`
+	Credentials  Credentials       `json:"credentials"`
+	Headers      map[string]string `json:"headers"`
+	Path         string            `json:"path"`
+	Health       *HealthStatus     `json:"health,omitempty"`
+}
+
+// Add validation/initialization method
+func (t *UpstreamTarget) Initialize(upstreamID string, index int) {
+	if t.ID == "" {
+		t.ID = fmt.Sprintf("%s-%s-%d", upstreamID, t.Provider, index)
+	}
 }
 
 type Credentials struct {

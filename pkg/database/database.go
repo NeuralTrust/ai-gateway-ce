@@ -41,7 +41,6 @@ func NewDB(cfg *Config) (*DB, error) {
 		&models.APIKey{},
 		&models.Service{},
 		&models.Upstream{},
-		&models.HealthCheck{},
 	); err != nil {
 		return nil, fmt.Errorf("failed to auto-migrate schema: %w", err)
 	}

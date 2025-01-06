@@ -8,9 +8,10 @@ import (
 
 // Config holds all configuration
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Redis    RedisConfig    `mapstructure:"redis"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Database  DatabaseConfig  `mapstructure:"database"`
+	Redis     RedisConfig     `mapstructure:"redis"`
+	Providers ProvidersConfig `mapstructure:"providers"`
 }
 
 // ServerConfig holds server configuration
@@ -62,6 +63,13 @@ func Load() error {
 	if err := viper.Unmarshal(&globalConfig); err != nil {
 		return fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+
+	// Load provider config
+	providerConfig, err := LoadProviderConfig()
+	if err != nil {
+		return fmt.Errorf("failed to load provider config: %w", err)
+	}
+	globalConfig.Providers = *providerConfig
 
 	return nil
 }

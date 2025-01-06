@@ -4,6 +4,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -11,18 +12,19 @@ import (
 )
 
 type UpstreamTarget struct {
-	ID          string          `json:"id" gorm:"primaryKey"`
-	Weight      int             `json:"weight,omitempty"`
-	Priority    int             `json:"priority,omitempty"`
-	Tags        TagsJSON        `json:"tags,omitempty" gorm:"type:jsonb"`
-	Headers     HeadersJSON     `json:"headers,omitempty" gorm:"type:jsonb"`
-	Path        string          `json:"path,omitempty"`
-	Host        string          `json:"host,omitempty"`
-	Port        int             `json:"port,omitempty"`
-	Protocol    string          `json:"protocol,omitempty"`
-	Provider    string          `json:"provider,omitempty"`
-	Models      ModelsJSON      `json:"models,omitempty" gorm:"type:jsonb"`
-	Credentials CredentialsJSON `json:"credentials,omitempty" gorm:"type:jsonb"`
+	ID           string          `json:"id" gorm:"primaryKey"`
+	Weight       int             `json:"weight,omitempty"`
+	Priority     int             `json:"priority,omitempty"`
+	Tags         TagsJSON        `json:"tags,omitempty" gorm:"type:jsonb"`
+	Headers      HeadersJSON     `json:"headers,omitempty" gorm:"type:jsonb"`
+	Path         string          `json:"path,omitempty"`
+	Host         string          `json:"host,omitempty"`
+	Port         int             `json:"port,omitempty"`
+	Protocol     string          `json:"protocol,omitempty"`
+	Provider     string          `json:"provider,omitempty"`
+	Models       ModelsJSON      `json:"models,omitempty" gorm:"type:jsonb"`
+	DefaultModel string          `json:"default_model,omitempty"`
+	Credentials  CredentialsJSON `json:"credentials,omitempty" gorm:"type:jsonb"`
 }
 
 // Add this type for Models array
@@ -115,6 +117,12 @@ func (t *UpstreamTarget) Validate() error {
 		if len(t.Models) == 0 {
 			return fmt.Errorf("provider-type target requires at least one model")
 		}
+		if t.DefaultModel == "" {
+			return fmt.Errorf("provider-type target requires a default model")
+		}
+		if t.DefaultModel != "" && !slices.Contains(t.Models, t.DefaultModel) {
+			return fmt.Errorf("default model must be in the models list")
+		}
 	} else if t.Host != "" {
 		if t.Port <= 0 || t.Port > 65535 {
 			return fmt.Errorf("invalid port number")
@@ -132,6 +140,11 @@ func (t *UpstreamTarget) Validate() error {
 func (u *Upstream) BeforeCreate(tx *gorm.DB) error {
 	if u.ID == "" {
 		u.ID = uuid.New().String()
+	}
+	for i := range u.Targets {
+		if u.Targets[i].ID == "" {
+			u.Targets[i].ID = fmt.Sprintf("%s-%s-%d", u.ID, u.Targets[i].Provider, i)
+		}
 	}
 	return u.Validate()
 }

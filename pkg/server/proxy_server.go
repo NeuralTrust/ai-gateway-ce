@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,8 @@ import (
 	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/plugins"
 	"ai-gateway-ce/pkg/types"
+
+	"golang.org/x/exp/slices"
 )
 
 type ProxyServer struct {
@@ -36,6 +39,7 @@ type ProxyServer struct {
 	skipAuthCheck bool
 	httpClient    *http.Client
 	loadBalancers sync.Map // map[string]*LoadBalancer
+	providers     map[string]config.ProviderConfig
 }
 
 // Cache TTLs
@@ -69,6 +73,7 @@ func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Re
 		pluginCache:   pluginCache,
 		skipAuthCheck: skipAuthCheck,
 		httpClient:    &http.Client{},
+		providers:     config.Providers.Providers,
 	}
 
 	// Subscribe to gateway events
@@ -614,37 +619,63 @@ func convertModelToTypesRules(rules []models.ForwardingRule) []types.ForwardingR
 }
 
 func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.ForwardingRule) (*types.ResponseContext, error) {
-	// Get service for the rule
 	service, err := s.repo.GetService(req.Context, rule.ServiceID)
 	if err != nil {
 		return nil, fmt.Errorf("service not found: %w", err)
 	}
 
-	var target *types.UpstreamTarget
-	var lb *LoadBalancer
 	switch service.Type {
 	case models.ServiceTypeUpstream:
-		// Get upstream for the service
-		upstream, err := s.repo.GetUpstream(req.Context, service.UpstreamID)
+		upstreamModel, err := s.repo.GetUpstream(req.Context, service.UpstreamID)
 		if err != nil {
 			return nil, fmt.Errorf("upstream not found: %w", err)
 		}
 
-		// Get or create load balancer for the upstream
-		lb, err = s.getLoadBalancer(upstream)
+		lb, err := s.getLoadBalancer(upstreamModel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get load balancer: %w", err)
 		}
 
-		// Get next target from load balancer
-		target, err = lb.NextTarget(req.Context)
-		if err != nil {
-			return nil, fmt.Errorf("no available targets: %w", err)
+		// Try with retries and fallback
+		maxRetries := rule.RetryAttempts
+		if maxRetries == 0 {
+			maxRetries = 2 // default retries
 		}
 
+		var lastErr error
+		for attempt := 0; attempt <= maxRetries; attempt++ {
+			target, err := lb.NextTarget(req.Context)
+			if err != nil {
+				return nil, fmt.Errorf("no available targets: %w", err)
+			}
+
+			s.logger.WithFields(logrus.Fields{
+				"attempt":   attempt + 1,
+				"target_id": target.ID,
+				"provider":  target.Provider,
+			}).Debug("Attempting request")
+
+			response, err := s.doForwardRequest(req, rule, target, service.Type, lb)
+			if err == nil {
+				lb.ReportSuccess(target)
+				return response, nil
+			}
+
+			lastErr = err
+			lb.ReportFailure(target, err)
+
+			if attempt == maxRetries {
+				s.logger.WithFields(logrus.Fields{
+					"total_attempts": maxRetries + 1,
+					"last_error":     lastErr.Error(),
+				}).Error("All retry attempts failed")
+				return nil, fmt.Errorf("all retry attempts failed, last error: %v", lastErr)
+			}
+		}
+		return nil, lastErr
+
 	case models.ServiceTypeEndpoint:
-		// Create target from service's direct configuration
-		target = &types.UpstreamTarget{
+		target := &types.UpstreamTarget{
 			Host:        service.Host,
 			Port:        service.Port,
 			Protocol:    service.Protocol,
@@ -652,90 +683,13 @@ func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.Forw
 			Headers:     service.Headers,
 			Credentials: types.Credentials(service.Credentials),
 		}
+		return s.doForwardRequest(req, rule, target, service.Type, nil)
 
 	default:
 		return nil, fmt.Errorf("unsupported service type: %s", service.Type)
 	}
-
-	// Rest of the existing forwardRequest logic remains the same
-	client := &fasthttp.Client{}
-	httpReq := fasthttp.AcquireRequest()
-	httpResp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(httpReq)
-	defer fasthttp.ReleaseResponse(httpResp)
-
-	// Build target URL based on target type
-	var targetURL string
-	if target.Provider != "" {
-		// For provider targets, infer host based on provider
-		var host string
-		switch target.Provider {
-		case "openai":
-			host = "api.openai.com"
-		case "anthropic":
-			host = "api.anthropic.com"
-		case "cohere":
-			host = "api.cohere.ai"
-		default:
-			return nil, fmt.Errorf("unsupported provider: %s", target.Provider)
-		}
-
-		targetURL = fmt.Sprintf("https://%s%s",
-			host,
-			target.Path, // Use the path configured in the upstream target
-		)
-	} else {
-		// For regular backend targets
-		targetURL = fmt.Sprintf("%s://%s:%d%s",
-			target.Protocol,
-			target.Host,
-			target.Port,
-			target.Path,
-		)
-	}
-
-	if rule.StripPath {
-		targetURL = strings.TrimSuffix(targetURL, "/") + strings.TrimPrefix(req.Path, rule.Path)
-	}
-
-	// Set request details
-	httpReq.SetRequestURI(targetURL)
-	httpReq.Header.SetMethod(req.Method)
-	httpReq.SetBody(req.Body)
-
-	// Copy headers
-	for k, v := range req.Headers {
-		for _, val := range v {
-			httpReq.Header.Add(k, val)
-		}
-	}
-
-	// Apply authentication
-	s.applyAuthentication(httpReq, &target.Credentials, req.Body)
-
-	// Make the request
-	err = client.Do(httpReq, httpResp)
-	if err != nil {
-		if service.Type == models.ServiceTypeUpstream {
-			lb.ReportFailure(target, err)
-		}
-		return nil, fmt.Errorf("failed to forward request: %w", err)
-	}
-
-	// Report success if status code is 2xx
-	if httpResp.StatusCode() >= 200 && httpResp.StatusCode() < 300 {
-		if service.Type == models.ServiceTypeUpstream {
-			lb.ReportSuccess(target)
-		}
-	} else if service.Type == models.ServiceTypeUpstream {
-		lb.ReportFailure(target, fmt.Errorf("upstream returned status code %d", httpResp.StatusCode))
-	}
-
-	// Create response
-	return s.createResponse(httpResp), nil
 }
 
-// Convert types.Credentials to CredentialsJSON
 func (s *ProxyServer) applyAuthentication(req *fasthttp.Request, creds *types.Credentials, body []byte) {
 	if creds == nil {
 		s.logger.Debug("No credentials found")
@@ -793,6 +747,7 @@ func (s *ProxyServer) createResponse(resp *fasthttp.Response) *types.ResponseCon
 		Body:       resp.Body(),
 	}
 
+	// Copy all response headers
 	resp.Header.VisitAll(func(key, value []byte) {
 		k := string(key)
 		v := string(value)
@@ -886,18 +841,6 @@ func (s *ProxyServer) subscribeToEvents() {
 	}
 }
 
-// Helper function to convert string slice to PluginConfig slice
-func convertPluginChain(chain []string) []types.PluginConfig {
-	configs := make([]types.PluginConfig, len(chain))
-	for i, name := range chain {
-		configs[i] = types.PluginConfig{
-			Name:    name,
-			Enabled: true,
-		}
-	}
-	return configs
-}
-
 func (s *ProxyServer) getLoadBalancer(upstream *models.Upstream) (*LoadBalancer, error) {
 	if lb, ok := s.loadBalancers.Load(upstream.ID); ok {
 		return lb.(*LoadBalancer), nil
@@ -906,4 +849,296 @@ func (s *ProxyServer) getLoadBalancer(upstream *models.Upstream) (*LoadBalancer,
 	lb := NewLoadBalancer(upstream, s.logger, s.cache)
 	s.loadBalancers.Store(upstream.ID, lb)
 	return lb, nil
+}
+
+func (s *ProxyServer) doForwardRequest(req *types.RequestContext, rule *types.ForwardingRule, target *types.UpstreamTarget, serviceType string, lb *LoadBalancer) (*types.ResponseContext, error) {
+	client := &fasthttp.Client{
+		ReadTimeout:  time.Second * 30,
+		WriteTimeout: time.Second * 30,
+	}
+
+	httpReq := fasthttp.AcquireRequest()
+	httpResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(httpReq)
+	defer fasthttp.ReleaseResponse(httpResp)
+
+	// Build target URL based on target type
+	var targetURL string
+
+	if target.Provider != "" {
+		providerConfig, ok := s.providers[target.Provider]
+		if !ok {
+			return nil, fmt.Errorf("unsupported provider: %s", target.Provider)
+		}
+		s.logger.WithField("providerConfig", providerConfig).Debug("Provider config")
+		// Use target's path to determine the endpoint
+		endpointConfig, ok := providerConfig.Endpoints[target.Path]
+		if !ok {
+			return nil, fmt.Errorf("unsupported endpoint path: %s", target.Path)
+		}
+
+		targetURL = fmt.Sprintf("%s%s",
+			providerConfig.BaseURL,
+			endpointConfig.Path,
+		)
+	} else {
+		targetURL = fmt.Sprintf("%s://%s:%d%s",
+			target.Protocol,
+			target.Host,
+			target.Port,
+			target.Path,
+		)
+	}
+
+	if rule.StripPath {
+		targetURL = strings.TrimSuffix(targetURL, "/") + strings.TrimPrefix(req.Path, rule.Path)
+	}
+	httpReq.SetRequestURI(targetURL)
+	httpReq.Header.SetMethod(req.Method)
+
+	// Then handle the body
+	if len(req.Body) > 0 {
+		if target.Provider != "" {
+			s.logger.WithField("target", target).WithField("body", string(req.Body)).Debug("Transforming request body")
+			transformedBody, err := s.transformRequestBody(req.Body, target)
+			if err != nil {
+				return nil, fmt.Errorf("failed to transform request body: %w", err)
+			}
+			httpReq.SetBody(transformedBody)
+		} else {
+			httpReq.SetBody(req.Body)
+		}
+	}
+
+	// Copy headers from request including X-Selected-Provider
+	for k, v := range req.Headers {
+		for _, val := range v {
+			httpReq.Header.Add(k, val)
+		}
+	}
+
+	// Add target-specific headers
+	if len(target.Headers) > 0 {
+		for k, v := range target.Headers {
+			httpReq.Header.Set(k, v)
+		}
+	}
+
+	s.applyAuthentication(httpReq, &target.Credentials, req.Body)
+
+	if err := client.Do(httpReq, httpResp); err != nil {
+		return nil, fmt.Errorf("failed to forward request: %w", err)
+	}
+
+	// Set provider in response header after successful request
+	httpResp.Header.Set("X-Selected-Provider", target.Provider)
+
+	// Validate response status code
+	statusCode := httpResp.StatusCode()
+	if statusCode <= 0 || statusCode >= 600 {
+		return nil, fmt.Errorf("invalid status code received: %d", statusCode)
+	}
+
+	// Check for non-2xx status
+	if statusCode < 200 || statusCode >= 300 {
+		respBody := httpResp.Body()
+		return nil, fmt.Errorf("upstream returned status code %d: %s", statusCode, string(respBody))
+	}
+
+	return s.createResponse(httpResp), nil
+}
+
+func (s *ProxyServer) transformRequestBody(body []byte, target *types.UpstreamTarget) ([]byte, error) {
+	// Handle empty body case
+	if len(body) == 0 {
+		return body, nil
+	}
+
+	// Parse original request
+	var requestData map[string]interface{}
+	if err := json.Unmarshal(body, &requestData); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal request body: %w", err)
+	}
+
+	targetEndpointConfig, ok := s.providers[target.Provider].Endpoints[target.Path]
+	if !ok || targetEndpointConfig.Schema == nil {
+		return nil, fmt.Errorf("missing schema for target provider %s endpoint %s", target.Provider, target.Path)
+	}
+
+	// Handle model validation before transformation
+	if modelName, ok := requestData["model"].(string); ok {
+		s.logger.WithFields(logrus.Fields{
+			"current_model":  modelName,
+			"allowed_models": target.Models,
+			"default_model":  target.DefaultModel,
+			"provider":       target.Provider,
+		}).Debug("Validating model")
+
+		if !slices.Contains(target.Models, modelName) {
+			s.logger.WithFields(logrus.Fields{
+				"from_model": modelName,
+				"to_model":   target.DefaultModel,
+				"provider":   target.Provider,
+			}).Debug("Switching to target default model")
+			requestData["model"] = target.DefaultModel
+		}
+	} else {
+		s.logger.WithFields(logrus.Fields{
+			"default_model": target.DefaultModel,
+			"provider":      target.Provider,
+		}).Debug("No model specified, using target default")
+		requestData["model"] = target.DefaultModel
+	}
+
+	// Transform data to target format
+	transformed, err := s.mapBetweenSchemas(requestData, nil, targetEndpointConfig.Schema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to transform request for provider %s endpoint %s: %w",
+			target.Provider, target.Path, err)
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"transformed": transformed,
+		"provider":    target.Provider,
+	}).Debug("Final transformed request")
+
+	return json.Marshal(transformed)
+}
+
+func (s *ProxyServer) mapBetweenSchemas(data map[string]interface{}, sourceSchema, targetSchema *config.ProviderSchema) (map[string]interface{}, error) {
+	// When no source schema is provided, we just validate against target schema
+	if targetSchema == nil {
+		return nil, fmt.Errorf("missing target schema configuration")
+	}
+
+	result := make(map[string]interface{})
+
+	s.logger.WithFields(logrus.Fields{
+		"source_data":   data,
+		"target_schema": targetSchema.RequestFormat,
+	}).Debug("Starting schema transformation")
+
+	// Map fields according to schema
+	for targetKey, targetField := range targetSchema.RequestFormat {
+		s.logger.WithFields(logrus.Fields{
+			"target_key":   targetKey,
+			"target_field": targetField,
+		}).Debug("Processing field")
+
+		// When no source schema, try direct field access first
+		value, err := s.extractValueByPath(data, nil, targetField.Path)
+		if err != nil {
+			if targetField.Default != nil {
+				s.logger.WithFields(logrus.Fields{
+					"field":   targetKey,
+					"default": targetField.Default,
+				}).Debug("Using default value")
+				result[targetKey] = targetField.Default
+				continue
+			}
+			if targetField.Required {
+				return nil, fmt.Errorf("missing required field %s: %w", targetKey, err)
+			}
+			s.logger.WithFields(logrus.Fields{
+				"field": targetKey,
+				"error": err,
+			}).Debug("Skipping optional field")
+			continue
+		}
+		result[targetKey] = value
+	}
+
+	s.logger.WithField("transformed", result).Debug("Schema transformation complete")
+	return result, nil
+}
+
+func (s *ProxyServer) extractValueByPath(data map[string]interface{}, sourceFormat map[string]config.SchemaField, path string) (interface{}, error) {
+	s.logger.WithFields(logrus.Fields{
+		"data": data,
+		"path": path,
+	}).Debug("Extracting value by path")
+
+	if path == "" {
+		return nil, fmt.Errorf("empty path")
+	}
+
+	// Direct field access for simple paths
+	if !strings.Contains(path, ".") && !strings.Contains(path, "[") {
+		if val, exists := data[path]; exists {
+			s.logger.WithFields(logrus.Fields{
+				"path":  path,
+				"value": val,
+			}).Debug("Found direct value")
+			return val, nil
+		}
+		return nil, fmt.Errorf("key not found: %s", path)
+	}
+
+	// Split path into segments (e.g., "messages[0].content" -> ["messages", "[0]", "content"])
+	segments := strings.FieldsFunc(path, func(r rune) bool {
+		return r == '.' || r == '[' || r == ']'
+	})
+
+	var current interface{} = data
+	for i, segment := range segments {
+		s.logger.WithFields(logrus.Fields{
+			"segment": segment,
+			"current": current,
+		}).Debug("Processing path segment")
+
+		// Handle array index
+		if idx, err := strconv.Atoi(segment); err == nil {
+			if arr, ok := current.([]interface{}); ok {
+				if idx < 0 || idx >= len(arr) {
+					return nil, fmt.Errorf("array index out of bounds: %d", idx)
+				}
+				if i == len(segments)-1 {
+					return arr[idx], nil
+				}
+				// If not last segment, next value must be a map
+				if nextMap, ok := arr[idx].(map[string]interface{}); ok {
+					current = nextMap
+					continue
+				}
+				return nil, fmt.Errorf("expected object at index %d", idx)
+			}
+			return nil, fmt.Errorf("expected array for index access")
+		}
+
+		// Handle special paths
+		switch segment {
+		case "last":
+			if arr, ok := current.([]interface{}); ok {
+				if len(arr) == 0 {
+					return nil, fmt.Errorf("array is empty")
+				}
+				if i == len(segments)-1 {
+					return arr[len(arr)-1], nil
+				}
+				// If not last segment, next value must be a map
+				if nextMap, ok := arr[len(arr)-1].(map[string]interface{}); ok {
+					current = nextMap
+					continue
+				}
+				return nil, fmt.Errorf("expected object at last index")
+			}
+			return nil, fmt.Errorf("expected array for 'last' access")
+
+		default:
+			// Regular object property access
+			if currentMap, ok := current.(map[string]interface{}); ok {
+				if val, exists := currentMap[segment]; exists {
+					if i == len(segments)-1 {
+						return val, nil
+					}
+					current = val // Set current to the value for next iteration
+					continue
+				}
+				return nil, fmt.Errorf("key not found: %s", segment)
+			}
+			return nil, fmt.Errorf("expected object at path %s", segment)
+		}
+	}
+
+	return nil, fmt.Errorf("invalid path")
 }

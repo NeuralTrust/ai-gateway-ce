@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strconv"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -44,18 +43,32 @@ func NewLoadBalancer(upstream *models.Upstream, logger logrus.FieldLogger, cache
 			json.Unmarshal(credBytes, &creds)
 		}
 
+		// Initialize health status
+		healthStatus := &types.HealthStatus{
+			Healthy:   true,
+			LastCheck: time.Now(),
+		}
+
+		// Store initial health status in cache
+		key := fmt.Sprintf("lb:health:%s:%s", upstream.ID, t.ID)
+		if statusJSON, err := json.Marshal(healthStatus); err == nil {
+			cache.Set(context.Background(), key, string(statusJSON), time.Hour)
+		}
+
 		targets[i] = &types.UpstreamTarget{
-			ID:          t.ID,
-			Weight:      t.Weight,
-			Host:        t.Host,
-			Port:        t.Port,
-			Protocol:    t.Protocol,
-			Provider:    t.Provider,
-			Models:      t.Models,
-			Credentials: creds,
-			Headers:     t.Headers,
-			Path:        t.Path,
-			Health:      &types.HealthStatus{Healthy: true},
+			ID:           t.ID,
+			Weight:       t.Weight,
+			Priority:     t.Priority,
+			Host:         t.Host,
+			Port:         t.Port,
+			Protocol:     t.Protocol,
+			Provider:     t.Provider,
+			Models:       t.Models,
+			DefaultModel: t.DefaultModel,
+			Credentials:  creds,
+			Headers:      t.Headers,
+			Path:         t.Path,
+			Health:       healthStatus,
 		}
 	}
 
@@ -77,49 +90,87 @@ func (lb *LoadBalancer) NextTarget(ctx context.Context) (*types.UpstreamTarget, 
 	priorityGroups := make(map[int][]*types.UpstreamTarget)
 	var priorities []int
 	for _, target := range lb.targets {
-		if _, exists := priorityGroups[target.Priority]; !exists {
-			priorities = append(priorities, target.Priority)
+		// Check target health before grouping
+		health, err := lb.getTargetHealth(ctx, target.ID)
+		if err == nil && health.Healthy {
+			if _, exists := priorityGroups[target.Priority]; !exists {
+				priorities = append(priorities, target.Priority)
+			}
+			priorityGroups[target.Priority] = append(priorityGroups[target.Priority], target)
 		}
-		priorityGroups[target.Priority] = append(priorityGroups[target.Priority], target)
+	}
+
+	if len(priorities) == 0 {
+		// If no healthy targets found, try to reset health status and retry
+		lb.resetHealthStatus(ctx)
+		return lb.fallbackTarget(ctx)
 	}
 
 	// Sort priorities (ascending order - lower number = higher priority)
 	sort.Ints(priorities)
 
-	// Try each priority group until we find a healthy target
+	// Try each priority group
 	for _, priority := range priorities {
-		healthyTargets := lb.getHealthyTargets(priorityGroups[priority])
-		if len(healthyTargets) > 0 {
+		targets := priorityGroups[priority]
+		if len(targets) > 0 {
 			switch lb.algorithm {
 			case "round-robin":
-				return lb.roundRobin(healthyTargets)
+				return lb.roundRobin(targets)
 			case "weighted-round-robin":
-				return lb.weightedRoundRobin(healthyTargets)
+				return lb.weightedRoundRobin(targets)
 			case "least-conn":
-				return lb.leastConnections(healthyTargets)
+				return lb.leastConnections(targets)
 			default:
-				return lb.roundRobin(healthyTargets)
+				return lb.roundRobin(targets)
 			}
 		}
 	}
 
-	return nil, fmt.Errorf("no healthy targets available at any priority level")
+	return nil, fmt.Errorf("no healthy targets available")
 }
 
 func (lb *LoadBalancer) getHealthyTargets(targets []*types.UpstreamTarget) []*types.UpstreamTarget {
 	healthy := make([]*types.UpstreamTarget, 0)
 	for _, target := range targets {
 		key := fmt.Sprintf("lb:health:%s:%s", lb.upstreamID, target.ID)
-		if val, err := lb.cache.Get(context.Background(), key); err == nil {
+		val, err := lb.cache.Get(context.Background(), key)
+
+		// Log health check status
+		lb.logger.WithFields(logrus.Fields{
+			"target_id": target.ID,
+			"provider":  target.Provider,
+			"key":       key,
+			"err":       err,
+			"value":     val,
+		}).Debug("Checking target health")
+
+		if err == nil {
 			var status types.HealthStatus
-			if err := json.Unmarshal([]byte(val), &status); err == nil && status.Healthy {
-				healthy = append(healthy, target)
+			if err := json.Unmarshal([]byte(val), &status); err == nil {
+				target.Health = &status // Update target's health status
+				if status.Healthy {
+					healthy = append(healthy, target)
+				}
+				continue
 			}
-		} else {
-			// If no health status found, consider target healthy by default
-			healthy = append(healthy, target)
 		}
+
+		// If no health status found or error, initialize as healthy
+		status := &types.HealthStatus{
+			Healthy:   true,
+			LastCheck: time.Now(),
+		}
+		statusJSON, _ := json.Marshal(status)
+		lb.cache.Set(context.Background(), key, string(statusJSON), time.Hour)
+		target.Health = status
+		healthy = append(healthy, target)
 	}
+
+	lb.logger.WithFields(logrus.Fields{
+		"total_targets":   len(targets),
+		"healthy_targets": len(healthy),
+	}).Debug("Health check summary")
+
 	return healthy
 }
 
@@ -140,25 +191,68 @@ func (lb *LoadBalancer) roundRobin(targets []*types.UpstreamTarget) (*types.Upst
 }
 
 func (lb *LoadBalancer) weightedRoundRobin(targets []*types.UpstreamTarget) (*types.UpstreamTarget, error) {
+	// Log available targets first
+	for i, target := range targets {
+		lb.logger.WithFields(logrus.Fields{
+			"index":    i,
+			"provider": target.Provider,
+			"weight":   target.Weight,
+			"path":     target.Path,
+		}).Debug("Available target")
+	}
+
 	totalWeight := 0
 	for _, target := range targets {
 		totalWeight += target.Weight
 	}
 
 	if totalWeight == 0 {
+		lb.logger.Warn("Total weight is 0, falling back to round robin")
 		return lb.roundRobin(targets)
 	}
 
-	next := atomic.AddUint64(&lb.current, 1) % uint64(totalWeight)
-	runningTotal := 0
+	// Use Redis to maintain distributed counter
+	counterKey := fmt.Sprintf("lb:wrr_counter:%s", lb.upstreamID)
+	count, err := lb.cache.Client().Incr(context.Background(), counterKey).Result()
+	if err != nil {
+		return nil, err
+	}
 
-	for _, target := range targets {
-		runningTotal += target.Weight
-		if uint64(runningTotal) > next {
+	// Reset counter if it exceeds a large number to prevent overflow
+	if count > int64(totalWeight*1000) {
+		lb.cache.Client().Set(context.Background(), counterKey, 0, 0)
+		count = 0
+	}
+
+	// Calculate the target based on weights
+	point := count % int64(totalWeight)
+
+	lb.logger.WithFields(logrus.Fields{
+		"count":         count,
+		"point":         point,
+		"total_weight":  totalWeight,
+		"targets_count": len(targets),
+	}).Debug("Weighted round robin")
+
+	// Select target based on weight ranges
+	currentWeight := int64(0)
+	for i, target := range targets {
+		prevWeight := currentWeight
+		currentWeight += int64(target.Weight)
+		if point >= prevWeight && point < currentWeight {
+			lb.logger.WithFields(logrus.Fields{
+				"selected_target": i,
+				"provider":        target.Provider,
+				"weight_range":    fmt.Sprintf("%d-%d", prevWeight, currentWeight-1),
+				"point":           point,
+				"path":            target.Path,
+			}).Debug("Selected target")
 			return target, nil
 		}
 	}
 
+	// Fallback to first target if something went wrong
+	lb.logger.Warn("Falling back to first target in weighted round robin")
 	return targets[0], nil
 }
 
@@ -253,10 +347,67 @@ func (lb *LoadBalancer) UpdateTargetHealth(target *types.UpstreamTarget, healthy
 
 // Add this method to report failures from the proxy server
 func (lb *LoadBalancer) ReportFailure(target *types.UpstreamTarget, err error) {
+	lb.logger.WithFields(logrus.Fields{
+		"target": target,
+		"error":  err,
+	}).Error("ReportFailure")
 	lb.UpdateTargetHealth(target, false, err)
 }
 
 // Add this method to report successes from the proxy server
 func (lb *LoadBalancer) ReportSuccess(target *types.UpstreamTarget) {
 	lb.UpdateTargetHealth(target, true, nil)
+}
+
+// Add new method for fallback logic
+func (lb *LoadBalancer) fallbackTarget(ctx context.Context) (*types.UpstreamTarget, error) {
+	// Try to find any target, even if marked unhealthy
+	for _, target := range lb.targets {
+		lb.logger.WithFields(logrus.Fields{
+			"target_id": target.ID,
+			"provider":  target.Provider,
+		}).Info("Attempting fallback to potentially unhealthy target")
+		return target, nil
+	}
+	return nil, fmt.Errorf("no targets available for fallback")
+}
+
+// Add method to reset health status
+func (lb *LoadBalancer) resetHealthStatus(ctx context.Context) {
+	lb.logger.Info("Resetting health status for all targets")
+	for _, target := range lb.targets {
+		health := &types.HealthStatus{
+			Healthy:   true,
+			LastCheck: time.Now(),
+			Failures:  0,
+			LastError: nil,
+		}
+		lb.setTargetHealth(ctx, target.ID, health)
+	}
+}
+
+func (lb *LoadBalancer) getTargetHealth(ctx context.Context, targetID string) (*types.HealthStatus, error) {
+	key := fmt.Sprintf("lb:health:%s:%s", lb.upstreamID, targetID)
+	val, err := lb.cache.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+
+	var health types.HealthStatus
+	if err := json.Unmarshal([]byte(val), &health); err != nil {
+		return nil, err
+	}
+
+	return &health, nil
+}
+
+func (lb *LoadBalancer) setTargetHealth(ctx context.Context, targetID string, health *types.HealthStatus) {
+	key := fmt.Sprintf("lb:health:%s:%s", lb.upstreamID, targetID)
+	healthJSON, err := json.Marshal(health)
+	if err != nil {
+		lb.logger.WithError(err).Error("Failed to marshal health status")
+		return
+	}
+
+	lb.cache.Set(ctx, key, string(healthJSON), time.Hour)
 }

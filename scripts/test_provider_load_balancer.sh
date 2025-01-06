@@ -9,77 +9,22 @@ NC='\033[0m' # No Color
 ADMIN_URL=${ADMIN_URL:-"http://localhost:8080/api/v1"}
 PROXY_URL=${PROXY_URL:-"http://localhost:8081"}
 BASE_DOMAIN=${BASE_DOMAIN:-"example.com"}
-SUBDOMAIN="balancer-$(date +%s)"
+SUBDOMAIN="multi-provider-$(date +%s)"
 GATEWAY_ID=""
 API_KEY=""
 
 # Initialize counters for providers
 openai_count=0
 anthropic_count=0
-total_requests=100
+total_requests=5
 
 echo -e "${GREEN}1. Creating test gateway with multiple providers...${NC}"
 
-# First create an upstream
-UPSTREAM_RESPONSE=$(curl -s -X POST "$ADMIN_URL/upstreams" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "name": "ai-providers-upstream",
-        "algorithm": "weighted-round-robin",
-        "targets": [
-            {
-                "provider": "openai",
-                "weight": 70,
-                "models": ["gpt-3.5-turbo", "gpt-4"],
-                "credentials": {
-                    "header_name": "Authorization",
-                    "header_value": "Bearer sk-openai-key"
-                }
-            },
-            {
-                "provider": "anthropic",
-                "weight": 20,
-                "models": ["claude-2", "claude-instant-1"],
-                "credentials": {
-                    "header_name": "x-api-key",
-                    "header_value": "sk-anthropic-key"
-                }
-            }
-        ]
-    }')
-
-UPSTREAM_ID=$(echo "$UPSTREAM_RESPONSE" | jq -r '.id')
-
-# Then create a service that uses this upstream
-SERVICE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/services" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "name": "ai-chat-service",
-        "type": "ai",
-        "description": "Load balanced AI chat completion service",
-        "upstream_id": "'"$UPSTREAM_ID"'",
-        "path": "/v1/chat/completions",
-        "retries": 3,
-        "tags": ["ai", "chat"]
-    }')
-
-SERVICE_ID=$(echo "$SERVICE_RESPONSE" | jq -r '.id')
-
-# Finally create a gateway with a forwarding rule that points to the service
 GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
     -H "Content-Type: application/json" \
     -d '{
-        "name": "'"$GATEWAY_NAME"'",
-        "subdomain": "'"$SUBDOMAIN"'",
-        "forwarding_rules": [
-            {
-                "path": "/chat",
-                "service_id": "'"$SERVICE_ID"'",
-                "methods": ["POST"],
-                "strip_path": true,
-                "active": true
-            }
-        ]
+        "name": "multi-provider-gateway-'$(date +%s)'",
+        "subdomain": "'"$SUBDOMAIN"'"
     }')
 
 # Extract gateway ID and API key
@@ -110,27 +55,115 @@ fi
 
 echo "API Key created: $API_KEY"
 # Wait for configuration to propagate
-sleep 2
+
+# Create an upstream
+UPSTREAM_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/upstreams" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "name": "ai-providers-upstream-'$(date +%s)'",
+        "algorithm": "round-robin",
+        "targets": [
+            {
+                "path": "/v1/chat/completions",
+                "provider": "openai",
+                "weight": 50,
+                "priority": 1,
+                "default_model": "gpt-4o-mini",
+                "models": ["gpt-3.5-turbo", "gpt-4", "gpt-4o-mini"],
+                "credentials": {
+                    "header_name": "Authorization",
+                    "header_value": "Bearer '"$OPENAI_API_KEY"'"
+                }
+            },
+            {
+                "path": "/v1/messages",
+                "provider": "anthropic",
+                "weight": 50,
+                "priority": 1,
+                "default_model": "claude-3-5-sonnet-20241022",
+                "models": ["claude-3-5-sonnet-20241022"],
+                "headers": {
+                    "anthropic-version": "2023-06-01"
+                },
+                "credentials": {
+                    "header_name": "x-api-key",
+                    "header_value": "'"$ANTHROPIC_API_KEY"'"
+                }
+            }
+        ],
+        "health_checks": {
+            "passive": true,
+            "threshold": 3,
+            "interval": 60
+        }
+    }')
+
+UPSTREAM_ID=$(echo "$UPSTREAM_RESPONSE" | jq -r '.id')
+
+if [ "$UPSTREAM_ID" == "null" ] || [ -z "$UPSTREAM_ID" ]; then
+    echo -e "${RED}Failed to create upstream. Response: $UPSTREAM_RESPONSE${NC}"
+    exit 1
+fi
+
+echo "Upstream created with ID: $UPSTREAM_ID"
+# Then create a service that uses this upstream
+SERVICE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/services" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "name": "ai-chat-service-'$(date +%s)'",
+        "description": "Load balanced AI chat completion service",
+        "upstream_id": "'"$UPSTREAM_ID"'",
+        "type": "upstream",
+        "tags": ["ai", "chat"]
+    }')
+
+SERVICE_ID=$(echo "$SERVICE_RESPONSE" | jq -r '.id')
+
+if [ "$SERVICE_ID" == "null" ] || [ -z "$SERVICE_ID" ]; then
+    echo -e "${RED}Failed to create service. Response: $SERVICE_RESPONSE${NC}"
+    exit 1
+fi
+
+echo "Service created with ID: $SERVICE_ID"
+
+# Create rule
+RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "path": "/v1",
+    "service_id": "'$SERVICE_ID'",
+    "methods": ["POST"],
+    "strip_path": false,
+    "active": true
+}')
+
+RULE_ID=$(echo "$RULE_RESPONSE" | jq -r '.id')
+
+if [ "$RULE_ID" == "null" ] || [ -z "$RULE_ID" ]; then
+    echo -e "${RED}Failed to create rule. Response: $RULE_RESPONSE${NC}"
+    exit 1
+fi
+
+echo "Rule created with ID: $RULE_ID"
 
 echo -e "\n${GREEN}2. Testing provider load balancing...${NC}"
 for i in $(seq 1 $total_requests); do
     # Alternate between models to test both providers
-    if [ $((i % 2)) -eq 0 ]; then
-        MODEL="gpt-3.5-turbo"
-    else
-        MODEL="claude-2"
-    fi
+    MODEL="gpt-4o-mini"
     
     # Make request and capture response headers
-    RESPONSE_HEADERS=$(curl -s -D - -X POST "http://$PROXY_URL/v1/chat/completions" \
+    RESPONSE_HEADERS=$(curl -s -D - -X POST "$PROXY_URL/v1" \
         -H "Content-Type: application/json" \
         -H "Host: $SUBDOMAIN.$BASE_DOMAIN" \
         -H "Authorization: Bearer $API_KEY" \
         -d '{
             "model": "'"$MODEL"'",
-            "messages": [{"role": "user", "content": "Hello"}]
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1024,
+            "system": "You are a helpful assistant."
         }' 2>&1)
     
+    echo "$RESPONSE_HEADERS"
     # Extract the selected provider from response headers
     SELECTED_PROVIDER=$(echo "$RESPONSE_HEADERS" | grep -i "X-Selected-Provider" | cut -d' ' -f2 | tr -d '\r')
     

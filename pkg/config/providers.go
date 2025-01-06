@@ -4,14 +4,33 @@ import (
 	"fmt"
 	"os"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
 // ProviderConfig represents the configuration for a single provider
 type ProviderConfig struct {
-	BaseURL   string            `yaml:"base_url"`
-	Endpoints map[string]string `yaml:"endpoints"`
-	ModelMap  map[string]string `yaml:"model_map"`
+	Name      string                    `yaml:"name"`
+	BaseURL   string                    `yaml:"base_url"`
+	Endpoints map[string]EndpointConfig `yaml:"endpoints"`
+}
+
+type EndpointConfig struct {
+	Path   string          `yaml:"path"`
+	Schema *ProviderSchema `yaml:"schema,omitempty"`
+}
+
+type ProviderSchema struct {
+	IdentifyingKeys []string               `yaml:"identifying_keys"`
+	RequestFormat   map[string]SchemaField `yaml:"request_format"`
+	ResponseFormat  map[string]SchemaField `yaml:"response_format"`
+}
+
+type SchemaField struct {
+	Type      string      `yaml:"type"` // string, array, object, number, boolean
+	Required  bool        `yaml:"required"`
+	Path      string      `yaml:"path"` // JSON path for mapping
+	Default   interface{} `yaml:"default,omitempty"`
+	Condition string      `yaml:"condition,omitempty"` // Condition for extracting value
 }
 
 // ProvidersConfig represents the configuration for all providers
@@ -29,12 +48,6 @@ func LoadProviderConfig() (*ProvidersConfig, error) {
 	var config ProvidersConfig
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal provider config: %w", err)
-	}
-
-	// Debug: Print loaded config
-	fmt.Printf("Loaded provider config: %+v\n", config)
-	for name, provider := range config.Providers {
-		fmt.Printf("Provider %s: base_url=%s\n", name, provider.BaseURL)
 	}
 
 	return &config, nil
