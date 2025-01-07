@@ -160,6 +160,7 @@ for i in $(seq 1 $total_requests); do
             "model": "'"$MODEL"'",
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 1024,
+            "stream": true,
             "system": "You are a helpful assistant."
         }' 2>&1)
     

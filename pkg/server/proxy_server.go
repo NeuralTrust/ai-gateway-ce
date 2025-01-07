@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -93,6 +94,17 @@ func (s *ProxyServer) Run() error {
 	// Create a new router group for all routes
 	baseGroup := s.router.Group("")
 
+	// Add fasthttp context middleware
+	baseGroup.Use(func(c *gin.Context) {
+		// Create a new fasthttp context
+		fctx := fasthttp.RequestCtx{}
+		// Store both fasthttp context and the response writer
+		ctx := context.WithValue(c.Request.Context(), "fasthttp", &fctx)
+		ctx = context.WithValue(ctx, "http_response_writer", c.Writer)
+		c.Request = c.Request.WithContext(ctx)
+		c.Next()
+	})
+
 	// Add system routes handler to the base group
 	baseGroup.Use(func(c *gin.Context) {
 		path := c.Request.URL.Path
@@ -171,13 +183,14 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 
 	// Create the RequestContext
 	reqCtx := &types.RequestContext{
-		Context:   ctx,
-		GatewayID: gatewayID.(string),
-		Headers:   make(map[string][]string),
-		Method:    method,
-		Path:      path,
-		Query:     c.Request.URL.Query(),
-		Metadata:  metadata,
+		Context:     ctx,
+		FasthttpCtx: c.Request.Context().Value("fasthttp").(*fasthttp.RequestCtx),
+		GatewayID:   gatewayID.(string),
+		Headers:     make(map[string][]string),
+		Method:      method,
+		Path:        path,
+		Query:       c.Request.URL.Query(),
+		Metadata:    metadata,
 	}
 	// Read the request body
 	bodyData, err := io.ReadAll(c.Request.Body)
@@ -646,13 +659,14 @@ func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.Forw
 		for attempt := 0; attempt <= maxRetries; attempt++ {
 			target, err := lb.NextTarget(req.Context)
 			if err != nil {
-				return nil, fmt.Errorf("no available targets: %w", err)
+				lastErr = err
+				continue
 			}
 
 			s.logger.WithFields(logrus.Fields{
 				"attempt":   attempt + 1,
-				"target_id": target.ID,
 				"provider":  target.Provider,
+				"target_id": target.ID,
 			}).Debug("Attempting request")
 
 			response, err := s.doForwardRequest(req, rule, target, service.Type, lb)
@@ -690,74 +704,208 @@ func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.Forw
 	}
 }
 
-func (s *ProxyServer) applyAuthentication(req *fasthttp.Request, creds *types.Credentials, body []byte) {
-	if creds == nil {
-		s.logger.Debug("No credentials found")
-		return
-	}
-	s.logger.WithFields(logrus.Fields{
-		"creds": creds,
-	}).Debug("Applying authentication")
-	// Header-based auth
-	if creds.HeaderName != "" && creds.HeaderValue != "" {
-		s.logger.WithFields(logrus.Fields{
-			"header_name": creds.HeaderName,
-			// Don't log the actual value for security
-			"has_value": creds.HeaderValue != "",
-		}).Debug("Setting auth header")
-
-		// Set the auth header
-		req.Header.Set(creds.HeaderName, creds.HeaderValue)
+func (s *ProxyServer) doForwardRequest(req *types.RequestContext, rule *types.ForwardingRule, target *types.UpstreamTarget, serviceType string, lb *LoadBalancer) (*types.ResponseContext, error) {
+	client := &fasthttp.Client{
+		ReadTimeout:  time.Second * 30,
+		WriteTimeout: time.Second * 30,
 	}
 
-	// Parameter-based auth
-	if creds.ParamName != "" && creds.ParamValue != "" {
-		if creds.ParamLocation == "query" {
-			uri := req.URI()
-			args := uri.QueryArgs()
-			args.Set(creds.ParamName, creds.ParamValue)
-		} else if creds.ParamLocation == "body" && len(body) > 0 {
-			// Parse JSON body
-			var jsonBody map[string]interface{}
-			if err := json.Unmarshal(body, &jsonBody); err != nil {
-				s.logger.WithError(err).Error("Failed to parse request body")
-				return
+	httpReq := fasthttp.AcquireRequest()
+	httpResp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(httpReq)
+	defer fasthttp.ReleaseResponse(httpResp)
+
+	// Build target URL based on target type
+	var targetURL string
+	if target.Provider != "" {
+		providerConfig, ok := s.providers[target.Provider]
+		if !ok {
+			return nil, fmt.Errorf("unsupported provider: %s", target.Provider)
+		}
+		s.logger.WithField("providerConfig", providerConfig).Debug("Provider config")
+
+		endpointConfig, ok := providerConfig.Endpoints[target.Path]
+		if !ok {
+			return nil, fmt.Errorf("unsupported endpoint path: %s", target.Path)
+		}
+		targetURL = fmt.Sprintf("%s%s", providerConfig.BaseURL, endpointConfig.Path)
+	} else {
+		targetURL = fmt.Sprintf("%s://%s:%d%s",
+			target.Protocol,
+			target.Host,
+			target.Port,
+			target.Path,
+		)
+	}
+
+	if rule.StripPath {
+		targetURL = strings.TrimSuffix(targetURL, "/") + strings.TrimPrefix(req.Path, rule.Path)
+	}
+	httpReq.SetRequestURI(targetURL)
+	httpReq.Header.SetMethod(req.Method)
+
+	// Handle request body and check for streaming
+	if len(req.Body) > 0 {
+		var requestData map[string]interface{}
+		if err := json.Unmarshal(req.Body, &requestData); err == nil {
+			if stream, ok := requestData["stream"].(bool); ok && stream {
+				return s.handleStreamingRequest(req, target, requestData)
 			}
+		}
 
-			// Add auth parameter
-			jsonBody[creds.ParamName] = creds.ParamValue
-
-			// Rewrite body
-			newBody, err := json.Marshal(jsonBody)
+		// Non-streaming request - transform body if needed
+		if target.Provider != "" {
+			transformedBody, err := s.transformRequestBody(req.Body, target)
 			if err != nil {
-				s.logger.WithError(err).Error("Failed to marshal request body")
-				return
+				return nil, fmt.Errorf("failed to transform request body: %w", err)
 			}
-
-			req.SetBody(newBody)
+			httpReq.SetBody(transformedBody)
+		} else {
+			httpReq.SetBody(req.Body)
 		}
 	}
+
+	// Copy headers and apply authentication
+	for k, v := range req.Headers {
+		for _, val := range v {
+			httpReq.Header.Add(k, val)
+		}
+	}
+	if len(target.Headers) > 0 {
+		for k, v := range target.Headers {
+			httpReq.Header.Set(k, v)
+		}
+	}
+	s.applyAuthentication(httpReq, &target.Credentials, req.Body)
+
+	// Make the request
+	if err := client.Do(httpReq, httpResp); err != nil {
+		return nil, fmt.Errorf("failed to forward request: %w", err)
+	}
+
+	// Set provider in response header
+	httpResp.Header.Set("X-Selected-Provider", target.Provider)
+
+	// Handle response status
+	statusCode := httpResp.StatusCode()
+	if statusCode <= 0 || statusCode >= 600 {
+		return nil, fmt.Errorf("invalid status code received: %d", statusCode)
+	}
+	if statusCode < 200 || statusCode >= 300 {
+		respBody := httpResp.Body()
+		return nil, fmt.Errorf("upstream returned status code %d: %s", statusCode, string(respBody))
+	}
+
+	return s.createResponse(httpResp), nil
 }
 
-// Helper function to create ResponseContext from fasthttp.Response
-func (s *ProxyServer) createResponse(resp *fasthttp.Response) *types.ResponseContext {
-	response := &types.ResponseContext{
-		StatusCode: resp.StatusCode(),
-		Headers:    make(map[string][]string),
-		Body:       resp.Body(),
+// handleStreamingRequest handles streaming requests to providers
+func (s *ProxyServer) handleStreamingRequest(req *types.RequestContext, target *types.UpstreamTarget, requestData map[string]interface{}) (*types.ResponseContext, error) {
+	// Transform request body if needed
+	transformedBody, err := s.transformRequestBody(req.Body, target)
+	if err != nil {
+		return nil, fmt.Errorf("failed to transform streaming request: %w", err)
 	}
 
-	// Copy all response headers
-	resp.Header.VisitAll(func(key, value []byte) {
-		k := string(key)
-		v := string(value)
-		if response.Headers[k] == nil {
-			response.Headers[k] = make([]string, 0)
-		}
-		response.Headers[k] = append(response.Headers[k], v)
-	})
+	// Update the request body with transformed data
+	req.Body = transformedBody
 
-	return response
+	// Handle the streaming based on the provider
+	return s.handleStreamingResponse(req, target)
+}
+
+func (s *ProxyServer) handleStreamingResponse(req *types.RequestContext, target *types.UpstreamTarget) (*types.ResponseContext, error) {
+	providerConfig, ok := s.providers[target.Provider]
+	if !ok {
+		return nil, fmt.Errorf("unsupported provider: %s", target.Provider)
+	}
+
+	endpointConfig, ok := providerConfig.Endpoints[target.Path]
+	if !ok {
+		return nil, fmt.Errorf("unsupported endpoint path: %s", target.Path)
+	}
+
+	upstreamURL := fmt.Sprintf("%s%s", providerConfig.BaseURL, endpointConfig.Path)
+
+	httpReq, err := http.NewRequestWithContext(req.Context, req.Method, upstreamURL, bytes.NewReader(req.Body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Copy headers
+	for k, v := range req.Headers {
+		if k != "Host" {
+			for _, val := range v {
+				httpReq.Header.Add(k, val)
+			}
+		}
+	}
+
+	// Set required headers for streaming
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Cache-Control", "no-cache")
+	httpReq.Header.Set("Connection", "keep-alive")
+
+	// Apply authentication and target headers
+	if target.Credentials.HeaderValue != "" {
+		httpReq.Header.Set(target.Credentials.HeaderName, target.Credentials.HeaderValue)
+	}
+	for k, v := range target.Headers {
+		httpReq.Header.Set(k, v)
+	}
+
+	resp, err := http.DefaultClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make streaming request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return &types.ResponseContext{
+			StatusCode: resp.StatusCode,
+			Headers:    make(map[string][]string),
+			Body:       body,
+		}, nil
+	}
+
+	if w, ok := req.Context.Value("http_response_writer").(http.ResponseWriter); ok {
+		// Copy response headers
+		for k, v := range resp.Header {
+			for _, val := range v {
+				w.Header().Add(k, val)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+
+		reader := bufio.NewReader(resp.Body)
+
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				s.logger.WithError(err).Error("Error reading streaming response")
+				break
+			}
+
+			if _, err := w.Write(line); err != nil {
+				s.logger.WithError(err).Error("Failed to write SSE message")
+				break
+			}
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		}
+	}
+
+	return &types.ResponseContext{
+		StatusCode: resp.StatusCode,
+		Headers:    make(map[string][]string),
+		Streaming:  true,
+	}, nil
 }
 
 // Add getter for plugin manager
@@ -851,103 +999,6 @@ func (s *ProxyServer) getLoadBalancer(upstream *models.Upstream) (*LoadBalancer,
 	return lb, nil
 }
 
-func (s *ProxyServer) doForwardRequest(req *types.RequestContext, rule *types.ForwardingRule, target *types.UpstreamTarget, serviceType string, lb *LoadBalancer) (*types.ResponseContext, error) {
-	client := &fasthttp.Client{
-		ReadTimeout:  time.Second * 30,
-		WriteTimeout: time.Second * 30,
-	}
-
-	httpReq := fasthttp.AcquireRequest()
-	httpResp := fasthttp.AcquireResponse()
-	defer fasthttp.ReleaseRequest(httpReq)
-	defer fasthttp.ReleaseResponse(httpResp)
-
-	// Build target URL based on target type
-	var targetURL string
-
-	if target.Provider != "" {
-		providerConfig, ok := s.providers[target.Provider]
-		if !ok {
-			return nil, fmt.Errorf("unsupported provider: %s", target.Provider)
-		}
-		s.logger.WithField("providerConfig", providerConfig).Debug("Provider config")
-		// Use target's path to determine the endpoint
-		endpointConfig, ok := providerConfig.Endpoints[target.Path]
-		if !ok {
-			return nil, fmt.Errorf("unsupported endpoint path: %s", target.Path)
-		}
-
-		targetURL = fmt.Sprintf("%s%s",
-			providerConfig.BaseURL,
-			endpointConfig.Path,
-		)
-	} else {
-		targetURL = fmt.Sprintf("%s://%s:%d%s",
-			target.Protocol,
-			target.Host,
-			target.Port,
-			target.Path,
-		)
-	}
-
-	if rule.StripPath {
-		targetURL = strings.TrimSuffix(targetURL, "/") + strings.TrimPrefix(req.Path, rule.Path)
-	}
-	httpReq.SetRequestURI(targetURL)
-	httpReq.Header.SetMethod(req.Method)
-
-	// Then handle the body
-	if len(req.Body) > 0 {
-		if target.Provider != "" {
-			s.logger.WithField("target", target).WithField("body", string(req.Body)).Debug("Transforming request body")
-			transformedBody, err := s.transformRequestBody(req.Body, target)
-			if err != nil {
-				return nil, fmt.Errorf("failed to transform request body: %w", err)
-			}
-			httpReq.SetBody(transformedBody)
-		} else {
-			httpReq.SetBody(req.Body)
-		}
-	}
-
-	// Copy headers from request including X-Selected-Provider
-	for k, v := range req.Headers {
-		for _, val := range v {
-			httpReq.Header.Add(k, val)
-		}
-	}
-
-	// Add target-specific headers
-	if len(target.Headers) > 0 {
-		for k, v := range target.Headers {
-			httpReq.Header.Set(k, v)
-		}
-	}
-
-	s.applyAuthentication(httpReq, &target.Credentials, req.Body)
-
-	if err := client.Do(httpReq, httpResp); err != nil {
-		return nil, fmt.Errorf("failed to forward request: %w", err)
-	}
-
-	// Set provider in response header after successful request
-	httpResp.Header.Set("X-Selected-Provider", target.Provider)
-
-	// Validate response status code
-	statusCode := httpResp.StatusCode()
-	if statusCode <= 0 || statusCode >= 600 {
-		return nil, fmt.Errorf("invalid status code received: %d", statusCode)
-	}
-
-	// Check for non-2xx status
-	if statusCode < 200 || statusCode >= 300 {
-		respBody := httpResp.Body()
-		return nil, fmt.Errorf("upstream returned status code %d: %s", statusCode, string(respBody))
-	}
-
-	return s.createResponse(httpResp), nil
-}
-
 func (s *ProxyServer) transformRequestBody(body []byte, target *types.UpstreamTarget) ([]byte, error) {
 	// Handle empty body case
 	if len(body) == 0 {
@@ -965,47 +1016,30 @@ func (s *ProxyServer) transformRequestBody(body []byte, target *types.UpstreamTa
 		return nil, fmt.Errorf("missing schema for target provider %s endpoint %s", target.Provider, target.Path)
 	}
 
-	// Handle model validation before transformation
+	// Handle model validation and streaming
 	if modelName, ok := requestData["model"].(string); ok {
-		s.logger.WithFields(logrus.Fields{
-			"current_model":  modelName,
-			"allowed_models": target.Models,
-			"default_model":  target.DefaultModel,
-			"provider":       target.Provider,
-		}).Debug("Validating model")
-
 		if !slices.Contains(target.Models, modelName) {
-			s.logger.WithFields(logrus.Fields{
-				"from_model": modelName,
-				"to_model":   target.DefaultModel,
-				"provider":   target.Provider,
-			}).Debug("Switching to target default model")
 			requestData["model"] = target.DefaultModel
 		}
 	} else {
-		s.logger.WithFields(logrus.Fields{
-			"default_model": target.DefaultModel,
-			"provider":      target.Provider,
-		}).Debug("No model specified, using target default")
 		requestData["model"] = target.DefaultModel
 	}
 
 	// Transform data to target format
-	transformed, err := s.mapBetweenSchemas(requestData, nil, targetEndpointConfig.Schema)
+	transformed, err := s.mapBetweenSchemas(requestData, targetEndpointConfig.Schema)
 	if err != nil {
 		return nil, fmt.Errorf("failed to transform request for provider %s endpoint %s: %w",
 			target.Provider, target.Path, err)
 	}
 
-	s.logger.WithFields(logrus.Fields{
-		"transformed": transformed,
-		"provider":    target.Provider,
-	}).Debug("Final transformed request")
-
+	// Preserve streaming parameter if present in original request
+	if stream, ok := requestData["stream"].(bool); ok {
+		transformed["stream"] = stream
+	}
 	return json.Marshal(transformed)
 }
 
-func (s *ProxyServer) mapBetweenSchemas(data map[string]interface{}, sourceSchema, targetSchema *config.ProviderSchema) (map[string]interface{}, error) {
+func (s *ProxyServer) mapBetweenSchemas(data map[string]interface{}, targetSchema *config.ProviderSchema) (map[string]interface{}, error) {
 	// When no source schema is provided, we just validate against target schema
 	if targetSchema == nil {
 		return nil, fmt.Errorf("missing target schema configuration")
@@ -1013,51 +1047,25 @@ func (s *ProxyServer) mapBetweenSchemas(data map[string]interface{}, sourceSchem
 
 	result := make(map[string]interface{})
 
-	s.logger.WithFields(logrus.Fields{
-		"source_data":   data,
-		"target_schema": targetSchema.RequestFormat,
-	}).Debug("Starting schema transformation")
-
-	// Map fields according to schema
 	for targetKey, targetField := range targetSchema.RequestFormat {
-		s.logger.WithFields(logrus.Fields{
-			"target_key":   targetKey,
-			"target_field": targetField,
-		}).Debug("Processing field")
-
-		// When no source schema, try direct field access first
-		value, err := s.extractValueByPath(data, nil, targetField.Path)
+		value, err := s.extractValueByPath(data, targetField.Path)
 		if err != nil {
 			if targetField.Default != nil {
-				s.logger.WithFields(logrus.Fields{
-					"field":   targetKey,
-					"default": targetField.Default,
-				}).Debug("Using default value")
 				result[targetKey] = targetField.Default
 				continue
 			}
 			if targetField.Required {
 				return nil, fmt.Errorf("missing required field %s: %w", targetKey, err)
 			}
-			s.logger.WithFields(logrus.Fields{
-				"field": targetKey,
-				"error": err,
-			}).Debug("Skipping optional field")
 			continue
 		}
 		result[targetKey] = value
 	}
 
-	s.logger.WithField("transformed", result).Debug("Schema transformation complete")
 	return result, nil
 }
 
-func (s *ProxyServer) extractValueByPath(data map[string]interface{}, sourceFormat map[string]config.SchemaField, path string) (interface{}, error) {
-	s.logger.WithFields(logrus.Fields{
-		"data": data,
-		"path": path,
-	}).Debug("Extracting value by path")
-
+func (s *ProxyServer) extractValueByPath(data map[string]interface{}, path string) (interface{}, error) {
 	if path == "" {
 		return nil, fmt.Errorf("empty path")
 	}
@@ -1065,10 +1073,6 @@ func (s *ProxyServer) extractValueByPath(data map[string]interface{}, sourceForm
 	// Direct field access for simple paths
 	if !strings.Contains(path, ".") && !strings.Contains(path, "[") {
 		if val, exists := data[path]; exists {
-			s.logger.WithFields(logrus.Fields{
-				"path":  path,
-				"value": val,
-			}).Debug("Found direct value")
 			return val, nil
 		}
 		return nil, fmt.Errorf("key not found: %s", path)
@@ -1081,12 +1085,6 @@ func (s *ProxyServer) extractValueByPath(data map[string]interface{}, sourceForm
 
 	var current interface{} = data
 	for i, segment := range segments {
-		s.logger.WithFields(logrus.Fields{
-			"segment": segment,
-			"current": current,
-		}).Debug("Processing path segment")
-
-		// Handle array index
 		if idx, err := strconv.Atoi(segment); err == nil {
 			if arr, ok := current.([]interface{}); ok {
 				if idx < 0 || idx >= len(arr) {
@@ -1141,4 +1139,74 @@ func (s *ProxyServer) extractValueByPath(data map[string]interface{}, sourceForm
 	}
 
 	return nil, fmt.Errorf("invalid path")
+}
+
+// Helper function to create ResponseContext from fasthttp.Response
+func (s *ProxyServer) createResponse(resp *fasthttp.Response) *types.ResponseContext {
+	response := &types.ResponseContext{
+		StatusCode: resp.StatusCode(),
+		Headers:    make(map[string][]string),
+		Body:       resp.Body(),
+	}
+
+	// Copy all response headers
+	resp.Header.VisitAll(func(key, value []byte) {
+		k := string(key)
+		v := string(value)
+		if response.Headers[k] == nil {
+			response.Headers[k] = make([]string, 0)
+		}
+		response.Headers[k] = append(response.Headers[k], v)
+	})
+
+	return response
+}
+
+func (s *ProxyServer) applyAuthentication(req *fasthttp.Request, creds *types.Credentials, body []byte) {
+	if creds == nil {
+		s.logger.Debug("No credentials found")
+		return
+	}
+	s.logger.WithFields(logrus.Fields{
+		"creds": creds,
+	}).Debug("Applying authentication")
+	// Header-based auth
+	if creds.HeaderName != "" && creds.HeaderValue != "" {
+		s.logger.WithFields(logrus.Fields{
+			"header_name": creds.HeaderName,
+			// Don't log the actual value for security
+			"has_value": creds.HeaderValue != "",
+		}).Debug("Setting auth header")
+
+		// Set the auth header
+		req.Header.Set(creds.HeaderName, creds.HeaderValue)
+	}
+
+	// Parameter-based auth
+	if creds.ParamName != "" && creds.ParamValue != "" {
+		if creds.ParamLocation == "query" {
+			uri := req.URI()
+			args := uri.QueryArgs()
+			args.Set(creds.ParamName, creds.ParamValue)
+		} else if creds.ParamLocation == "body" && len(body) > 0 {
+			// Parse JSON body
+			var jsonBody map[string]interface{}
+			if err := json.Unmarshal(body, &jsonBody); err != nil {
+				s.logger.WithError(err).Error("Failed to parse request body")
+				return
+			}
+
+			// Add auth parameter
+			jsonBody[creds.ParamName] = creds.ParamValue
+
+			// Rewrite body
+			newBody, err := json.Marshal(jsonBody)
+			if err != nil {
+				s.logger.WithError(err).Error("Failed to marshal request body")
+				return
+			}
+
+			req.SetBody(newBody)
+		}
+	}
 }

@@ -3,6 +3,8 @@ package types
 import (
 	"context"
 	"net/url"
+
+	"github.com/valyala/fasthttp"
 )
 
 // Stage represents when a plugin should be executed
@@ -62,15 +64,16 @@ type PluginChain struct {
 
 // RequestContext represents the context for a request
 type RequestContext struct {
-	Context   context.Context
-	GatewayID string
-	Headers   map[string][]string
-	Method    string
-	Path      string
-	Query     url.Values
-	Body      []byte
-	Metadata  map[string]interface{}
-	Stage     Stage // Current execution stage
+	Context     context.Context
+	FasthttpCtx *fasthttp.RequestCtx
+	GatewayID   string
+	Headers     map[string][]string
+	Method      string
+	Path        string
+	Query       url.Values
+	Body        []byte
+	Metadata    map[string]interface{}
+	Stage       Stage // Current execution stage
 }
 
 // ResponseContext represents the context for a response
@@ -81,6 +84,7 @@ type ResponseContext struct {
 	Body       []byte
 	StatusCode int
 	Metadata   map[string]interface{}
+	Streaming  bool
 }
 
 // RateLimiterConfig represents the configuration for rate limiting
