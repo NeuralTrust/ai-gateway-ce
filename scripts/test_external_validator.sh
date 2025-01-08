@@ -59,17 +59,64 @@ echo -e "${GREEN}Successfully created API key:${NC}"
 echo -e "Gateway ID: $GATEWAY_ID"
 echo -e "API Key: $API_KEY"
 
-# 2. Create forwarding rule with external validator
-echo -e "${GREEN}2. Creating forwarding rule...${NC}"
+# Create upstream
+echo -e "${GREEN}2. Creating upstream...${NC}"
+UPSTREAM_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/upstreams" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "httpbin-upstream-'$(date +%s)'",
+    "algorithm": "round-robin",
+    "targets": [{
+        "host": "httpbin.org",
+        "port": 443,
+        "protocol": "https",
+        "path": "/anything",
+        "weight": 100,
+        "priority": 1
+    }],
+    "health_checks": {
+        "passive": true,
+        "threshold": 3,
+        "interval": 60
+    }
+}')
+
+UPSTREAM_ID=$(echo $UPSTREAM_RESPONSE | jq -r '.id')
+
+if [ -z "$UPSTREAM_ID" ] || [ "$UPSTREAM_ID" = "null" ]; then
+    echo -e "${RED}Failed to create upstream. Response: $UPSTREAM_RESPONSE${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Successfully created upstream with ID: $UPSTREAM_ID${NC}"
+
+# Create service
+echo -e "${GREEN}3. Creating service...${NC}"
+SERVICE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/services" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "httpbin-service-'$(date +%s)'",
+    "type": "upstream",
+    "description": "HTTPBin test service",
+    "upstream_id": "'$UPSTREAM_ID'"
+}')
+
+SERVICE_ID=$(echo $SERVICE_RESPONSE | jq -r '.id')
+
+if [ -z "$SERVICE_ID" ] || [ "$SERVICE_ID" = "null" ]; then
+    echo -e "${RED}Failed to create service. Response: $SERVICE_RESPONSE${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Successfully created service with ID: $SERVICE_ID${NC}"
+
+# Create forwarding rule with external validator
+echo -e "${GREEN}4. Creating forwarding rule...${NC}"
 curl -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/test",
-    "targets": [
-        {
-            "url": "https://httpbin.org/anything"
-        }
-    ],
+    "service_id": "'$SERVICE_ID'",
     "methods": ["POST"],
     "strip_path": true,
     "plugin_chain": [

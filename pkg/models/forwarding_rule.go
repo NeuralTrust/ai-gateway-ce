@@ -25,28 +25,17 @@ type ForwardingRule struct {
 	UpdatedAt     time.Time
 }
 
-func (fr *ForwardingRule) BeforeCreate(tx *gorm.DB) error {
-	if fr.ID == "" {
-		fr.ID = uuid.New().String()
-	}
-	return fr.Validate()
-}
-
-func (fr *ForwardingRule) BeforeUpdate(tx *gorm.DB) error {
-	fr.UpdatedAt = time.Now()
-	return fr.Validate()
-}
-
-func (fr *ForwardingRule) Validate() error {
-	if fr.Path == "" {
+// Validate checks if the rule is valid
+func (r *ForwardingRule) Validate() error {
+	if r.Path == "" {
 		return fmt.Errorf("path is required")
 	}
 
-	if fr.ServiceID == "" {
+	if r.ServiceID == "" {
 		return fmt.Errorf("service_id is required")
 	}
 
-	if len(fr.Methods) == 0 {
+	if len(r.Methods) == 0 {
 		return fmt.Errorf("at least one HTTP method is required")
 	}
 
@@ -55,7 +44,7 @@ func (fr *ForwardingRule) Validate() error {
 		"PATCH": true, "HEAD": true, "OPTIONS": true,
 	}
 
-	for _, method := range fr.Methods {
+	for _, method := range r.Methods {
 		if !validMethods[method] {
 			return fmt.Errorf("invalid HTTP method: %s", method)
 		}
@@ -64,4 +53,45 @@ func (fr *ForwardingRule) Validate() error {
 	return nil
 }
 
-// Include all the ForwardingRule-related methods
+// BeforeCreate is called before inserting a new forwarding rule into the database
+func (r *ForwardingRule) BeforeCreate(tx *gorm.DB) error {
+	// Generate UUID if not set
+	if r.ID == "" {
+		r.ID = uuid.New().String()
+	}
+
+	// Set timestamps
+	now := time.Now()
+	r.CreatedAt = now
+	r.UpdatedAt = now
+
+	// Generate unique IDs for plugins in the chain
+	if r.PluginChain != nil {
+		for i := range r.PluginChain {
+			if r.PluginChain[i].ID == "" { // Only generate if ID is not already set
+				r.PluginChain[i].ID = fmt.Sprintf("%s-%s-%d", r.GatewayID, r.PluginChain[i].Name, i)
+			}
+		}
+	}
+
+	// Validate the rule
+	return r.Validate()
+}
+
+// BeforeUpdate is called before updating a forwarding rule in the database
+func (r *ForwardingRule) BeforeUpdate(tx *gorm.DB) error {
+	// Update timestamp
+	r.UpdatedAt = time.Now()
+
+	// Generate unique IDs for any new plugins in the chain
+	if r.PluginChain != nil {
+		for i := range r.PluginChain {
+			if r.PluginChain[i].ID == "" { // Only generate if ID is not already set
+				r.PluginChain[i].ID = fmt.Sprintf("%s-%s-%d", r.GatewayID, r.PluginChain[i].Name, i)
+			}
+		}
+	}
+
+	// Validate the rule
+	return r.Validate()
+}

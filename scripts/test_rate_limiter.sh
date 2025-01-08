@@ -100,7 +100,6 @@ UPSTREAM_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/upstreams" 
     }
 }')
 
-echo $UPSTREAM_RESPONSE | jq .
 UPSTREAM_ID=$(echo $UPSTREAM_RESPONSE | jq -r '.id')
 
 if [ "$UPSTREAM_ID" == "null" ] || [ -z "$UPSTREAM_ID" ]; then
@@ -110,25 +109,25 @@ fi
 
 echo "Upstream created with ID: $UPSTREAM_ID"
 
-# Create services
-echo -e "\n${GREEN}4. Creating services...${NC}"
-SERVICE1_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/services" \
+# Create service
+echo -e "\n${GREEN}4. Creating service...${NC}"
+SERVICE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/services" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "service-'$(date +%s)'",
+    "name": "httpbin-service-'$(date +%s)'",
     "type": "upstream",
     "description": "HTTPBin test service",
     "upstream_id": "'$UPSTREAM_ID'"
 }')
 
-SERVICE1_ID=$(echo $SERVICE1_RESPONSE | jq -r '.id')
+SERVICE_ID=$(echo $SERVICE_RESPONSE | jq -r '.id')
 
-if [ "$SERVICE1_ID" == "null" ] || [ -z "$SERVICE1_ID" ]; then
-    echo -e "${RED}Failed to create service1. Response: $SERVICE1_RESPONSE${NC}"
+if [ "$SERVICE_ID" == "null" ] || [ -z "$SERVICE_ID" ]; then
+    echo -e "${RED}Failed to create service. Response: $SERVICE_RESPONSE${NC}"
     exit 1
 fi
 
-echo "Service1 created with ID: $SERVICE1_ID"
+echo "Service created with ID: $SERVICE_ID"
 
 # Create rules for different paths
 echo -e "\n${GREEN}5. Creating rules for different paths...${NC}"
@@ -136,7 +135,7 @@ RULE1_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/path1",
-    "service_id": "'$SERVICE1_ID'",
+    "service_id": "'$SERVICE_ID'",
     "methods": ["GET"],
     "strip_path": true,
     "active": true
@@ -146,7 +145,7 @@ RULE2_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
   -H "Content-Type: application/json" \
   -d '{
     "path": "/path2",
-    "service_id": "'$SERVICE1_ID'",
+    "service_id": "'$SERVICE_ID'",
     "methods": ["GET"],
     "strip_path": true,
     "active": true

@@ -64,18 +64,131 @@ create_test_gateway() {
 
     echo "API Key created: $API_KEY"
     
-    echo -e "\n${GREEN}3. Creating rules...${NC}"
+    echo -e "\n${GREEN}3. Creating upstream...${NC}"
+    # Create upstream with round-robin strategy
+    UPSTREAM_RR_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/upstreams" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "name": "round-robin-upstream-'$(date +%s)'",
+            "algorithm": "round-robin",
+            "targets": [
+                {
+                    "host": "localhost",
+                    "port": 9001,
+                    "protocol": "http",
+                    "weight": 100,
+                    "priority": 1
+                },
+                {
+                    "host": "localhost",
+                    "port": 9002,
+                    "protocol": "http",
+                    "weight": 100,
+                    "priority": 1
+                },
+                {
+                    "host": "localhost",
+                    "port": 9003,
+                    "protocol": "http",
+                    "weight": 100,
+                    "priority": 1
+                }
+            ],
+            "health_checks": {
+                "passive": true,
+                "threshold": 3,
+                "interval": 60
+            }
+        }')
+
+    UPSTREAM_RR_ID=$(echo "$UPSTREAM_RR_RESPONSE" | jq -r '.id')
+    if [ "$UPSTREAM_RR_ID" == "null" ] || [ -z "$UPSTREAM_RR_ID" ]; then
+        echo -e "${RED}Failed to create round-robin upstream. Response: $UPSTREAM_RR_RESPONSE${NC}"
+        exit 1
+    fi
+
+    # Create upstream with weighted strategy
+    UPSTREAM_W_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/upstreams" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "name": "weighted-upstream-'$(date +%s)'",
+            "algorithm": "weighted",
+            "targets": [
+                {
+                    "host": "localhost",
+                    "port": 9001,
+                    "protocol": "http",
+                    "weight": 60,
+                    "priority": 1
+                },
+                {
+                    "host": "localhost",
+                    "port": 9002,
+                    "protocol": "http",
+                    "weight": 30,
+                    "priority": 1
+                },
+                {
+                    "host": "localhost",
+                    "port": 9003,
+                    "protocol": "http",
+                    "weight": 10,
+                    "priority": 1
+                }
+            ],
+            "health_checks": {
+                "passive": true,
+                "threshold": 3,
+                "interval": 60
+            }
+        }')
+
+    UPSTREAM_W_ID=$(echo "$UPSTREAM_W_RESPONSE" | jq -r '.id')
+    if [ "$UPSTREAM_W_ID" == "null" ] || [ -z "$UPSTREAM_W_ID" ]; then
+        echo -e "${RED}Failed to create weighted upstream. Response: $UPSTREAM_W_RESPONSE${NC}"
+        exit 1
+    fi
+
+    echo -e "\n${GREEN}4. Creating services...${NC}"
+    # Create service for round-robin
+    SERVICE_RR_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/services" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "name": "round-robin-service-'$(date +%s)'",
+            "type": "upstream",
+            "description": "Round-robin test service",
+            "upstream_id": "'$UPSTREAM_RR_ID'"
+        }')
+
+    SERVICE_RR_ID=$(echo "$SERVICE_RR_RESPONSE" | jq -r '.id')
+    if [ "$SERVICE_RR_ID" == "null" ] || [ -z "$SERVICE_RR_ID" ]; then
+        echo -e "${RED}Failed to create round-robin service. Response: $SERVICE_RR_RESPONSE${NC}"
+        exit 1
+    fi
+
+    # Create service for weighted
+    SERVICE_W_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/services" \
+        -H "Content-Type: application/json" \
+        -d '{
+            "name": "weighted-service-'$(date +%s)'",
+            "type": "upstream",
+            "description": "Weighted test service",
+            "upstream_id": "'$UPSTREAM_W_ID'"
+        }')
+
+    SERVICE_W_ID=$(echo "$SERVICE_W_RESPONSE" | jq -r '.id')
+    if [ "$SERVICE_W_ID" == "null" ] || [ -z "$SERVICE_W_ID" ]; then
+        echo -e "${RED}Failed to create weighted service. Response: $SERVICE_W_RESPONSE${NC}"
+        exit 1
+    fi
+    
+    echo -e "\n${GREEN}5. Creating rules...${NC}"
     # Create round-robin rule
     RULE_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/rules" \
         -H "Content-Type: application/json" \
         -d '{
             "path": "/round-robin",
-            "load_balancing_strategy": "round_robin",
-            "targets": [
-                {"url": "http://localhost:9001", "active": true},
-                {"url": "http://localhost:9002", "active": true},
-                {"url": "http://localhost:9003", "active": true}
-            ],
+            "service_id": "'$SERVICE_RR_ID'",
             "methods": ["GET"],
             "strip_path": true,
             "active": true
@@ -91,12 +204,7 @@ create_test_gateway() {
         -H "Content-Type: application/json" \
         -d '{
             "path": "/weighted",
-            "load_balancing_strategy": "weighted",
-            "targets": [
-                {"url": "http://localhost:9001", "weight": 60, "active": true},
-                {"url": "http://localhost:9002", "weight": 30, "active": true},
-                {"url": "http://localhost:9003", "weight": 10, "active": true}
-            ],
+            "service_id": "'$SERVICE_W_ID'",
             "methods": ["GET"],
             "strip_path": true,
             "active": true
@@ -107,7 +215,7 @@ create_test_gateway() {
         exit 1
     fi
 
-    echo -e "${GREEN}Gateway and rules created successfully${NC}"
+    echo -e "${GREEN}Gateway, upstreams, services, and rules created successfully${NC}"
 }
 
 # Function to check if required tools are installed

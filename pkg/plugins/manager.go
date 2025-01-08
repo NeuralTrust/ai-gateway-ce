@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -135,11 +136,18 @@ func (m *Manager) executeChains(ctx context.Context, plugins map[string]pluginif
 	// Group parallel and sequential chains
 	var parallelChains, sequentialChains []types.PluginConfig
 	for _, chain := range chains {
-		// Skip if plugin was already executed in this stage
-		if executedPlugins[chain.Name] {
+		// Create a unique identifier using plugin ID
+		pluginInstanceID := chain.ID
+		if pluginInstanceID == "" {
+			// Fallback to name if ID is not set
+			pluginInstanceID = chain.Name
+		}
+
+		// Skip if this specific plugin instance was already executed in this stage
+		if executedPlugins[pluginInstanceID] {
 			continue
 		}
-		executedPlugins[chain.Name] = true
+		executedPlugins[pluginInstanceID] = true
 
 		if chain.Parallel {
 			parallelChains = append(parallelChains, chain)
@@ -185,54 +193,65 @@ func (m *Manager) executeParallel(ctx context.Context, plugins map[string]plugin
 	// Execute plugins by priority groups
 	for _, priority := range priorities {
 		group := priorityGroups[priority]
-		errChan := make(chan error, len(group))
+
+		// Create channels for results and errors
 		type pluginResult struct {
-			config   types.PluginConfig
-			response *types.PluginResponse
+			config    types.PluginConfig
+			response  *types.PluginResponse
+			err       error
+			startTime time.Time
+			endTime   time.Time
 		}
-		respChan := make(chan pluginResult, len(group))
+		resultChan := make(chan pluginResult, len(group))
+		// Launch all plugins in the group simultaneously
 		var wg sync.WaitGroup
-
-		// Create a context with cancel for this priority group
-		groupCtx, cancel := context.WithCancel(ctx)
-		defer cancel()
-
-		for _, cfg := range group {
+		for i := range group {
+			cfg := group[i]
 			wg.Add(1)
 			go func(cfg types.PluginConfig) {
 				defer wg.Done()
-				select {
-				case <-groupCtx.Done():
-					return
-				default:
-					if plugin, exists := plugins[cfg.Name]; exists {
-						pluginResp, err := plugin.Execute(ctx, cfg, req, resp)
-						if err != nil {
-							errChan <- err
-							cancel() // Cancel other goroutines in this group
-							return
-						}
-						respChan <- pluginResult{config: cfg, response: pluginResp}
+
+				pluginStartTime := time.Now()
+				if plugin, exists := plugins[cfg.Name]; exists {
+					pluginResp, err := plugin.Execute(ctx, cfg, req, resp)
+
+					pluginEndTime := time.Now()
+					resultChan <- pluginResult{
+						config:    cfg,
+						response:  pluginResp,
+						err:       err,
+						startTime: pluginStartTime,
+						endTime:   pluginEndTime,
 					}
 				}
 			}(cfg)
 		}
 
-		wg.Wait()
-		close(errChan)
-		close(respChan)
+		// Start a goroutine to close resultChan when all plugins finish
+		go func() {
+			wg.Wait()
+			close(resultChan)
+		}()
 
-		// Check for errors
-		for err := range errChan {
-			if err != nil {
-				return err
-			}
-		}
-
-		// Collect all responses
+		// Collect results
 		var results []pluginResult
-		for result := range respChan {
-			results = append(results, result)
+		var errors []error
+
+		// Wait for all results or context cancellation
+		for result := range resultChan {
+			if result.err != nil {
+				errors = append(errors, result.err)
+			}
+			if result.response != nil {
+				results = append(results, result)
+			}
+
+			select {
+			case <-ctx.Done():
+				m.logger.Errorf("Context cancelled while processing results: %v", ctx.Err())
+				return ctx.Err()
+			default:
+			}
 		}
 
 		// Sort results by plugin priority
@@ -240,7 +259,7 @@ func (m *Manager) executeParallel(ctx context.Context, plugins map[string]plugin
 			return results[i].config.Priority < results[j].config.Priority
 		})
 
-		// Apply responses in priority order
+		// Apply all successful responses
 		for _, result := range results {
 			if result.response != nil {
 				m.mu.Lock()
@@ -258,6 +277,11 @@ func (m *Manager) executeParallel(ctx context.Context, plugins map[string]plugin
 				}
 				m.mu.Unlock()
 			}
+		}
+
+		// If any plugin returned an error, return the first one
+		if len(errors) > 0 {
+			return errors[0]
 		}
 	}
 
@@ -360,4 +384,9 @@ func (m *Manager) GetPlugin(name string) pluginiface.Plugin {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.plugins[name]
+}
+
+// Add this helper function to generate a unique plugin ID
+func generatePluginID(gatewayID string, pluginName string, index int) string {
+	return fmt.Sprintf("%s-%s-%d", gatewayID, pluginName, index)
 }
