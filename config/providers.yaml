@@ -68,6 +68,14 @@ providers:
               type: string
               required: false
               path: user
+            stream_options:
+              type: object
+              required: false
+              path: stream_options
+            stream:
+              type: boolean
+              required: false
+              path: stream
       /v1/completions:
         path: "/v1/completions"
         schema:

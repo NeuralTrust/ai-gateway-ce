@@ -134,6 +134,9 @@ curl -N -X POST "$PROXY_URL/v1" \
     -d '{
         "model": "'"$MODEL"'",
         "stream": true,
+        "stream_options": {
+            "include_usage": true
+        },
         "messages": [{"role": "user", "content": "Hello, streaming test."}]
     }'
 

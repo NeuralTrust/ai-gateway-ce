@@ -127,22 +127,75 @@ func (p *TokenRateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginCo
 	// Handle different stages
 	switch req.Stage {
 	case types.PreRequest:
+		// Check if this is a streaming request
+		var requestBody map[string]interface{}
+		if err := json.Unmarshal(req.Body, &requestBody); err != nil {
+			return nil, fmt.Errorf("failed to parse request body: %w", err)
+		}
+
+		tokensToReserve := config.TokensPerRequest
+		isStreaming, _ := requestBody["stream"].(bool)
+
 		// Check both tokens and requests limits
-		if bucket.Tokens < config.TokensPerRequest {
+		if bucket.Tokens < tokensToReserve {
 			p.logger.WithFields(logrus.Fields{
-				"required_tokens":  config.TokensPerRequest,
+				"required_tokens":  tokensToReserve,
 				"available_tokens": bucket.Tokens,
 			}).Warn("Rate limit exceeded - not enough tokens")
+
+			// Calculate time until next refill
+			timeUntilRefill := time.Until(bucket.LastRefill.Add(time.Minute))
+			if timeUntilRefill < 0 {
+				timeUntilRefill = 0
+			}
+
+			// Set rate limit headers in response context
+			resp.Headers = map[string][]string{
+				"X-Ratelimit-Limit-Requests":     {strconv.Itoa(config.RequestsPerMinute)},
+				"X-Ratelimit-Limit-Tokens":       {strconv.Itoa(config.BucketSize)},
+				"X-Ratelimit-Remaining-Requests": {strconv.Itoa(bucket.RequestsRemaining)},
+				"X-Ratelimit-Remaining-Tokens":   {strconv.Itoa(bucket.Tokens)},
+				"X-Ratelimit-Reset-Requests":     {fmt.Sprintf("%ds", int(timeUntilRefill.Seconds()))},
+				"X-Ratelimit-Reset-Tokens":       {fmt.Sprintf("%ds", int(timeUntilRefill.Seconds()))},
+			}
+
 			return nil, &types.PluginError{
 				StatusCode: 429,
-				Message:    fmt.Sprintf("Rate limit exceeded. Not enough tokens available. Required: %d, Current: %d", config.TokensPerRequest, bucket.Tokens),
+				Message:    fmt.Sprintf("Rate limit exceeded. Not enough tokens available. Required: %d, Current: %d", tokensToReserve, bucket.Tokens),
 			}
 		}
 
 		if bucket.RequestsRemaining <= 0 {
+			// Calculate time until next refill
+			timeUntilRefill := time.Until(bucket.LastRefill.Add(time.Minute))
+			if timeUntilRefill < 0 {
+				timeUntilRefill = 0
+			}
+
+			// Set rate limit headers in response context
+			resp.Headers = map[string][]string{
+				"X-Ratelimit-Limit-Requests":     {strconv.Itoa(config.RequestsPerMinute)},
+				"X-Ratelimit-Limit-Tokens":       {strconv.Itoa(config.BucketSize)},
+				"X-Ratelimit-Remaining-Requests": {strconv.Itoa(bucket.RequestsRemaining)},
+				"X-Ratelimit-Remaining-Tokens":   {strconv.Itoa(bucket.Tokens)},
+				"X-Ratelimit-Reset-Requests":     {fmt.Sprintf("%ds", int(timeUntilRefill.Seconds()))},
+				"X-Ratelimit-Reset-Tokens":       {fmt.Sprintf("%ds", int(timeUntilRefill.Seconds()))},
+			}
+
 			return nil, &types.PluginError{
 				StatusCode: 429,
 				Message:    "Rate limit exceeded. No requests remaining.",
+			}
+		}
+
+		// For streaming requests, we need to reserve tokens and update the bucket immediately
+		if isStreaming {
+			bucket.Tokens -= tokensToReserve
+			bucket.RequestsRemaining--
+
+			if err := p.saveBucketState(ctx, bucketKey, bucket); err != nil {
+				p.logger.WithError(err).Error("Failed to save bucket state for streaming request")
+				return nil, err
 			}
 		}
 
@@ -152,7 +205,18 @@ func (p *TokenRateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginCo
 			timeUntilRefill = 0
 		}
 
-		// Return response with our rate limit headers
+		// Store rate limit headers in metadata for streaming responses
+		if isStreaming {
+			req.Metadata["rate_limit_headers"] = map[string][]string{
+				"X-Ratelimit-Limit-Requests":     {strconv.Itoa(config.RequestsPerMinute)},
+				"X-Ratelimit-Limit-Tokens":       {strconv.Itoa(config.BucketSize)},
+				"X-Ratelimit-Remaining-Requests": {strconv.Itoa(bucket.RequestsRemaining)},
+				"X-Ratelimit-Remaining-Tokens":   {strconv.Itoa(bucket.Tokens)},
+				"X-Ratelimit-Reset-Requests":     {fmt.Sprintf("%ds", int(timeUntilRefill.Seconds()))},
+				"X-Ratelimit-Reset-Tokens":       {fmt.Sprintf("%ds", int(timeUntilRefill.Seconds()))},
+			}
+		}
+
 		return &types.PluginResponse{
 			Headers: map[string][]string{
 				"X-Ratelimit-Limit-Requests":     {strconv.Itoa(config.RequestsPerMinute)},
@@ -165,7 +229,56 @@ func (p *TokenRateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginCo
 		}, nil
 
 	case types.PostResponse:
-		// Get token usage from OpenAI response
+		// For streaming requests, get token usage from metadata
+		var requestBody map[string]interface{}
+		if err := json.Unmarshal(req.Body, &requestBody); err != nil {
+			return nil, fmt.Errorf("failed to parse request body: %w", err)
+		}
+		isStreaming, _ := requestBody["stream"].(bool)
+		if isStreaming {
+			if tokenUsage, ok := req.Metadata["token_usage"].(map[string]interface{}); ok {
+				tokensToConsume := config.TokensPerRequest // default fallback
+
+				if tt, ok := tokenUsage["total_tokens"].(float64); ok {
+					tokensToConsume = int(tt)
+				}
+
+				// Update the bucket with actual token usage
+				bucket.Tokens -= tokensToConsume
+				bucket.RequestsRemaining--
+
+				// Save updated bucket state
+				if err := p.saveBucketState(ctx, bucketKey, bucket); err != nil {
+					p.logger.WithError(err).Error("Failed to save bucket state after streaming")
+					return nil, err
+				}
+
+				timeUntilRefill := time.Until(bucket.LastRefill.Add(time.Minute))
+				if timeUntilRefill < 0 {
+					timeUntilRefill = 0
+				}
+
+				p.logger.WithFields(logrus.Fields{
+					"streaming":          true,
+					"tokens_consumed":    tokensToConsume,
+					"tokens_remaining":   bucket.Tokens,
+					"requests_remaining": bucket.RequestsRemaining,
+				}).Debug("Token rate limiter post-response update for streaming")
+
+				return &types.PluginResponse{
+					Headers: map[string][]string{
+						"X-Ratelimit-Limit-Requests":     {strconv.Itoa(config.RequestsPerMinute)},
+						"X-Ratelimit-Limit-Tokens":       {strconv.Itoa(config.BucketSize)},
+						"X-Ratelimit-Remaining-Requests": {strconv.Itoa(bucket.RequestsRemaining)},
+						"X-Ratelimit-Remaining-Tokens":   {strconv.Itoa(bucket.Tokens)},
+						"X-Ratelimit-Reset-Requests":     {fmt.Sprintf("%ds", int(timeUntilRefill.Seconds()))},
+						"X-Ratelimit-Reset-Tokens":       {fmt.Sprintf("%ds", int(timeUntilRefill.Seconds()))},
+						"X-Tokens-Consumed":              {strconv.Itoa(tokensToConsume)},
+					},
+				}, nil
+			}
+		}
+
 		var tokensToConsume int
 		var responseBody map[string]interface{}
 		if err := json.Unmarshal(resp.Body, &responseBody); err != nil {
@@ -197,6 +310,13 @@ func (p *TokenRateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginCo
 		if timeUntilRefill < 0 {
 			timeUntilRefill = 0
 		}
+
+		p.logger.WithFields(logrus.Fields{
+			"bucket_key":         bucketKey,
+			"tokens":             bucket.Tokens,
+			"requests_remaining": bucket.RequestsRemaining,
+			"last_refill":        bucket.LastRefill,
+		}).Debug("Updated bucket state")
 
 		return &types.PluginResponse{
 			StatusCode: resp.StatusCode,

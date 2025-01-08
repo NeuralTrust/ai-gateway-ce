@@ -80,13 +80,15 @@ UPSTREAM_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways/$GATEWAY_ID/upstreams" 
     "name": "openai-upstream-'$(date +%s)'",
     "algorithm": "round-robin",
     "targets": [{
-        "provider": "openai",
-        "path": "/v1/chat/completions",
-        "credentials": {
+          "path": "/v1/chat/completions",
+          "provider": "openai",
+          "weight": 100,
+          "models": ["gpt-3.5-turbo","gpt-4","gpt-4o-mini"],
+          "default_model": "gpt-4o-mini",
+          "credentials": {
             "header_name": "Authorization",
-            "header_value": "Bearer '$OPENAI_API_KEY'"
-        },
-        "models": ["gpt-4o-mini"]
+            "header_value": "Bearer '"$OPENAI_API_KEY"'"
+        }
     }],
     "health_checks": {
         "passive": true,
@@ -171,12 +173,16 @@ make_chat_request() {
     echo "Prompt: $prompt"
     
     # Make the request and capture both headers and body
-    local response=$(curl -s -i -X POST "${PROXY_URL}/v1/chat/completions" \
+    local response=$(curl -v -s -i -X POST "${PROXY_URL}/v1/chat/completions" \
         -H "Content-Type: application/json" \
         -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
         -H "X-Api-Key: $API_KEY" \
         -d '{
             "model": "gpt-4o-mini",
+            "stream": true,
+            "stream_options": {
+                "include_usage": true
+            },
             "messages": [
                 {
                     "role": "user",

@@ -472,35 +472,43 @@ When creating or updating rules, the following validations are applied:
 #### Required Fields
 - `path`: Must be non-empty
 - `methods`: Must contain at least one valid HTTP method
-- `targets`: Must contain at least one target
+- `service`: Must reference a valid service
 
-#### Target Validation
-- Each target must have a valid URL
-- When using weighted distribution:
-  - All weights must be positive integers
-  - Total weights must sum to 100%
-  - If any target has a weight, all targets must have weights
+#### Service Configuration
+Rules now point to services instead of direct targets. A service can be either:
+- An upstream service that uses load balancing and health checks
+- A direct endpoint service that forwards to a specific host
 
-Example with validation errors:
-```bash
-# Invalid: Weights don't sum to 100
-curl -X POST http://localhost:8080/api/v1/tenants/{tenant_id}/rules \
-  -H "Authorization: Bearer {api_key}" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "path": "/api/*",
-    "targets": [
-      {
-        "url": "https://production.example.com",
-        "weight": 80  # Error: weights sum to 80
-      }
-    ],
-    "methods": ["GET"]
-  }'
-
-# Response:
+Example rule with upstream service:
+```json
 {
-    "error": "when using weighted distribution, weights must sum to 100 (got 80)"
+  "path": "/v1/chat/completions",
+  "service": "ai-service",
+  "methods": ["POST"],
+  "strip_path": true,
+  "plugin_chain": [
+    {
+      "name": "rate_limiter",
+      "enabled": true,
+      "priority": 1,
+      "stage": "pre_request",
+      "settings": {
+        "limit": 100,
+        "window": "1m"
+      }
+    }
+  ]
+}
+```
+
+Example rule with direct endpoint service:
+```json
+{
+  "path": "/api/*",
+  "service": "backend-service",
+  "methods": ["GET", "POST"],
+  "strip_path": false,
+  "preserve_host": true
 }
 ```
 
@@ -709,3 +717,71 @@ The gateway supports fallback targets for both gateway types:
 - Fallback targets follow the same retry policy
 - Headers and authentication are preserved for fallback requests
 - Supports weighted distribution for fallback targets
+
+## Upstream and Service Management
+
+### Upstreams
+Upstreams represent a group of backend targets that can serve requests. They support:
+
+- **Load Balancing**: Multiple algorithms including round-robin, weighted round-robin, and least connections
+- **Health Checks**: Passive health monitoring of targets
+- **Priority-based Routing**: Targets can be assigned priorities for fallback scenarios
+- **Provider Integration**: Direct integration with AI providers like OpenAI, Anthropic, etc.
+
+Example upstream configuration:
+```json
+{
+  "name": "ai-backends",
+  "algorithm": "weighted-round-robin",
+  "targets": [
+    {
+      "provider": "openai",
+      "weight": 2,
+      "priority": 1,
+      "models": ["gpt-4", "gpt-3.5-turbo"],
+      "default_model": "gpt-3.5-turbo"
+    },
+    {
+      "provider": "anthropic",
+      "weight": 1,
+      "priority": 2,
+      "models": ["claude-2", "claude-instant"],
+      "default_model": "claude-2"
+    }
+  ],
+  "health_checks": {
+    "passive": true,
+    "threshold": 3,
+    "interval": 60
+  }
+}
+```
+
+### Services
+Services define how requests are handled and can be of two types:
+
+- **Upstream Service**: Routes requests through a configured upstream
+- **Direct Endpoint**: Routes requests directly to a specific host/endpoint
+
+Example service configurations:
+```json
+{
+  "name": "ai-service",
+  "type": "upstream",
+  "upstream_id": "ai-backends"
+}
+
+{
+  "name": "direct-service",
+  "type": "endpoint",
+  "host": "api.example.com",
+  "port": 443,
+  "protocol": "https"
+}
+```
+
+### Load Balancing Features
+- **Weighted Distribution**: Requests distributed based on target weights
+- **Priority Fallback**: Automatic fallback to lower priority targets when higher priority targets fail
+- **Health-Aware**: Only healthy targets receive traffic
+- **Provider Selection Tracking**: Response headers include `X-Selected-Provider` for transparency

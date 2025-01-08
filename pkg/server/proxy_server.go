@@ -877,9 +877,20 @@ func (s *ProxyServer) handleStreamingResponse(req *types.RequestContext, target 
 				w.Header().Add(k, val)
 			}
 		}
+
+		// Add rate limit headers if they exist in metadata
+		if rateLimitHeaders, ok := req.Metadata["rate_limit_headers"].(map[string][]string); ok {
+			for k, v := range rateLimitHeaders {
+				for _, val := range v {
+					w.Header().Set(k, val)
+				}
+			}
+		}
+
 		w.WriteHeader(resp.StatusCode)
 
 		reader := bufio.NewReader(resp.Body)
+		var lastUsage map[string]interface{}
 
 		for {
 			line, err := reader.ReadBytes('\n')
@@ -891,6 +902,36 @@ func (s *ProxyServer) handleStreamingResponse(req *types.RequestContext, target 
 				break
 			}
 
+			// Check if this is a data line
+			if bytes.HasPrefix(line, []byte("data: ")) {
+				// Check if this is the [DONE] message
+				if bytes.Equal(line, []byte("data: [DONE]\n")) {
+					// If we have usage from the last chunk, store it
+					if lastUsage != nil {
+						req.Metadata["token_usage"] = lastUsage
+						s.logger.WithFields(logrus.Fields{
+							"token_usage": lastUsage,
+						}).Debug("Stored token usage from streaming response")
+					}
+					// Write the [DONE] message
+					if _, err := w.Write(line); err != nil {
+						s.logger.WithError(err).Error("Failed to write [DONE] message")
+						break
+					}
+					continue
+				}
+
+				// For non-[DONE] messages, try to extract usage info
+				jsonData := line[6:] // Skip "data: " prefix
+				var response map[string]interface{}
+				if err := json.Unmarshal(jsonData, &response); err == nil {
+					if usage, ok := response["usage"].(map[string]interface{}); ok {
+						lastUsage = usage
+					}
+				}
+			}
+
+			// Write the line to the client
 			if _, err := w.Write(line); err != nil {
 				s.logger.WithError(err).Error("Failed to write SSE message")
 				break
@@ -899,12 +940,21 @@ func (s *ProxyServer) handleStreamingResponse(req *types.RequestContext, target 
 				f.Flush()
 			}
 		}
+
+		// If we have usage info but didn't get a [DONE] message, store it anyway
+		if lastUsage != nil && req.Metadata["token_usage"] == nil {
+			req.Metadata["token_usage"] = lastUsage
+			s.logger.WithFields(logrus.Fields{
+				"token_usage": lastUsage,
+			}).Debug("Stored token usage from last chunk")
+		}
 	}
 
 	return &types.ResponseContext{
 		StatusCode: resp.StatusCode,
 		Headers:    make(map[string][]string),
 		Streaming:  true,
+		Metadata:   req.Metadata, // Include the metadata with token usage
 	}, nil
 }
 
