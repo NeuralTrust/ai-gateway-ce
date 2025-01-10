@@ -50,10 +50,18 @@ func InitializePlugins(cache *cache.Cache, logger *logrus.Logger) {
 	InitManager(cache, logger)
 	manager := GetManager()
 
-	// Register built-in plugins
-	manager.RegisterPlugin(rate_limiter.NewRateLimiterPlugin(cache.Client()))
-	manager.RegisterPlugin(external_api.NewExternalApiPlugin())
-	manager.RegisterPlugin(token_rate_limiter.NewTokenRateLimiterPlugin(logger, cache.Client()))
+	// Register built-in plugins with error handling
+	if err := manager.RegisterPlugin(rate_limiter.NewRateLimiterPlugin(cache.Client())); err != nil {
+		logger.WithError(err).Error("Failed to register rate limiter plugin")
+	}
+
+	if err := manager.RegisterPlugin(external_api.NewExternalApiPlugin()); err != nil {
+		logger.WithError(err).Error("Failed to register external API plugin")
+	}
+
+	if err := manager.RegisterPlugin(token_rate_limiter.NewTokenRateLimiterPlugin(logger, cache.Client())); err != nil {
+		logger.WithError(err).Error("Failed to register token rate limiter plugin")
+	}
 }
 
 // ValidatePlugin validates a plugin configuration

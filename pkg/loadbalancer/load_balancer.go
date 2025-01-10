@@ -16,12 +16,20 @@ import (
 )
 
 type LoadBalancer struct {
-	mu         sync.RWMutex
-	strategy   Strategy
-	logger     *logrus.Logger
-	cache      *cache.Cache
-	upstreamID string
-	upstream   *models.Upstream
+	mu           sync.RWMutex
+	strategy     Strategy
+	logger       *logrus.Logger
+	cache        *cache.Cache
+	upstreamID   string
+	upstream     *models.Upstream
+	targetStatus map[string]*TargetStatus
+}
+
+type TargetStatus struct {
+	LastAccess time.Time
+	Failures   int
+	Healthy    bool
+	LastError  error
 }
 
 func NewLoadBalancer(upstream *models.Upstream, logger *logrus.Logger, cache *cache.Cache) (*LoadBalancer, error) {
@@ -76,11 +84,12 @@ func NewLoadBalancer(upstream *models.Upstream, logger *logrus.Logger, cache *ca
 	}
 
 	return &LoadBalancer{
-		strategy:   strategy,
-		logger:     logger,
-		cache:      cache,
-		upstreamID: upstream.ID,
-		upstream:   upstream,
+		strategy:     strategy,
+		logger:       logger,
+		cache:        cache,
+		upstreamID:   upstream.ID,
+		upstream:     upstream,
+		targetStatus: make(map[string]*TargetStatus),
 	}, nil
 }
 
@@ -178,4 +187,28 @@ func (lb *LoadBalancer) fallbackTarget(ctx context.Context) (*types.UpstreamTarg
 		return target, nil
 	}
 	return nil, fmt.Errorf("no targets available for fallback")
+}
+
+func (lb *LoadBalancer) updateTargetStatus(target *types.UpstreamTarget, status *TargetStatus) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+
+	lb.targetStatus[target.ID] = status
+
+	// Cache the status
+	if lb.cache != nil {
+		key := fmt.Sprintf("target_status:%s", target.ID)
+		statusJSON, err := json.Marshal(status)
+		if err != nil {
+			lb.logger.WithError(err).Error("Failed to marshal target status")
+			return
+		}
+
+		if err := lb.cache.Set(context.Background(), key, string(statusJSON), time.Hour); err != nil {
+			lb.logger.WithFields(logrus.Fields{
+				"target": target.ID,
+				"error":  err,
+			}).Error("Failed to cache target status")
+		}
+	}
 }

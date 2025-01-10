@@ -81,11 +81,6 @@ func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Re
 	plugins.InitializePlugins(cache, logger)
 	manager := plugins.GetManager()
 
-	// Register extra plugins
-	for _, plugin := range extraPlugins {
-		manager.RegisterPlugin(plugin)
-	}
-
 	// Create TTL maps
 	gatewayCache := cache.CreateTTLMap("gateway", GatewayCacheTTL)
 	rulesCache := cache.CreateTTLMap("rules", RulesCacheTTL)
@@ -104,11 +99,13 @@ func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Re
 		lbFactory:     loadbalancer.NewBaseFactory(),
 	}
 
-	// Register extra plugins
+	// Register extra plugins with error handling
 	for _, plugin := range extraPlugins {
 		if err := manager.RegisterPlugin(plugin); err != nil {
-			logger.WithError(err).Errorf("Failed to register plugin: %s", plugin.Name())
-			continue // Skip failed plugin but continue with server creation
+			logger.WithFields(logrus.Fields{
+				"plugin": plugin.Name(),
+				"error":  err,
+			}).Error("Failed to register plugin")
 		}
 	}
 
