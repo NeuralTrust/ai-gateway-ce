@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/spf13/viper"
 )
@@ -63,6 +64,7 @@ func Load() error {
 	if err := viper.Unmarshal(&globalConfig); err != nil {
 		return fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+	log.Println("config", "config", globalConfig)
 
 	// Load provider config
 	providerConfig, err := LoadProviderConfig()
@@ -80,11 +82,9 @@ func setDefaults() {
 	viper.SetDefault("server.proxy_port", 8081)
 	viper.SetDefault("server.base_domain", "example.com")
 
-	viper.SetDefault("database.host", "localhost")
 	viper.SetDefault("database.port", 5432)
 	viper.SetDefault("database.sslmode", "disable")
 
-	viper.SetDefault("redis.host", "localhost")
 	viper.SetDefault("redis.port", 6379)
 	viper.SetDefault("redis.password", "")
 	viper.SetDefault("redis.db", 0)
