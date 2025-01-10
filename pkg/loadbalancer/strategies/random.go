@@ -2,7 +2,8 @@ package strategies
 
 import (
 	"ai-gateway-ce/pkg/types"
-	"math/rand/v2"
+	"crypto/rand"
+	"math/big"
 	"sync"
 )
 
@@ -25,7 +26,11 @@ func (r *Random) Next() *types.UpstreamTarget {
 		return nil
 	}
 
-	return &r.targets[rand.IntN(len(r.targets))]
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(r.targets))))
+	if err != nil {
+		return &r.targets[0] // fallback to first target on error
+	}
+	return &r.targets[n.Int64()]
 }
 
 func (r *Random) Name() string {
