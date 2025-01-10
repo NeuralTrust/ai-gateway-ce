@@ -6,14 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
@@ -27,38 +25,6 @@ import (
 	"ai-gateway-ce/pkg/plugins"
 	"ai-gateway-ce/pkg/types"
 )
-
-var validate = validator.New()
-
-func init() {
-	if err := validate.RegisterValidation("subdomain", validateSubdomainField); err != nil {
-		log.Fatalf("Failed to register subdomain validation: %v", err)
-	}
-}
-
-func validateSubdomainField(fl validator.FieldLevel) bool {
-	subdomain := fl.Field().String()
-
-	if len(subdomain) < 3 || len(subdomain) > 63 {
-		return false
-	}
-
-	if !isAlphanumeric(subdomain[0]) || !isAlphanumeric(subdomain[len(subdomain)-1]) {
-		return false
-	}
-
-	for _, c := range subdomain {
-		if !isAlphanumeric(byte(c)) && c != '-' {
-			return false
-		}
-	}
-
-	return true
-}
-
-func isAlphanumeric(c byte) bool {
-	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
-}
 
 type AdminServer struct {
 	*BaseServer

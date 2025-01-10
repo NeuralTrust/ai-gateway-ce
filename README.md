@@ -16,7 +16,7 @@
 
 [Documentation](https://docs.neuraltrust.ai) |
 [Quick Start](https://docs.neuraltrust.ai/category/step-by-step-guide) |
-[Community](https://discord.gg/JGV4q3tr)
+[Community](https://discord.gg/f93QsGeR)
 
 </div>
 
@@ -114,7 +114,7 @@ AI Gateway CE is licensed under the Apache License 2.0 - see the [LICENSE](LICEN
 ## 📫 Community & Support
 
 - [Documentation](https://docs.neuraltrust.ai)
-- [Discord Community](https://discord.gg/neuraltrust)
+- [Discord Community](https://discord.gg/f93QsGeR)
 - [GitHub Issues](https://github.com/neuraltrust/ai-gateway-ce/issues)
 - [Twitter](https://twitter.com/neuraltrust)
 - [Blog](https://neuraltrust.ai/en/resources/blog)

@@ -9,7 +9,6 @@ require (
 	golang.org/x/net v0.33.0
 	github.com/bytedance/sonic v1.12.5
 	github.com/gin-gonic/gin v1.10.0
-	github.com/go-playground/validator/v10 v10.20.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.10.9
