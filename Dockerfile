@@ -1,7 +1,12 @@
 # Build stage
-FROM golang:1.22-alpine AS builder
+FROM golang:1.21-alpine AS builder
 
-WORKDIR /app
+WORKDIR /build
+
+# Add build arguments
+ARG VERSION
+ARG GIT_COMMIT
+ARG BUILD_DATE
 
 # Install build dependencies
 RUN apk add --no-cache git
@@ -13,11 +18,14 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /app/bin/ai-gateway-ce ./cmd/gateway/main.go
+# Build the application
+RUN go build -ldflags "-X ai-gateway-ce/pkg/version.Version=${VERSION} \
+                      -X ai-gateway-ce/pkg/version.GitCommit=${GIT_COMMIT} \
+                      -X ai-gateway-ce/pkg/version.BuildDate=${BUILD_DATE}" \
+    -o gateway ./cmd/gateway
 
 # Final stage
-FROM alpine:latest
+FROM alpine:3.18
 
 WORKDIR /app
 
@@ -25,12 +33,9 @@ WORKDIR /app
 RUN apk add --no-cache ca-certificates tzdata
 
 # Copy binary and config files
-COPY --from=builder /app/bin/ai-gateway-ce /app/
+COPY --from=builder /build/gateway /app/
 COPY config.yaml /app/
-COPY config/providers.yaml /app/config/
-
-# Expose ports
-EXPOSE 8080 8081
+COPY config/ /app/config/
 
 # Set environment variables
 ENV GIN_MODE=release
@@ -38,5 +43,7 @@ ENV GIN_MODE=release
 # Add entrypoint script
 COPY scripts/docker-entrypoint.sh /app/
 RUN chmod +x /app/docker-entrypoint.sh
+
+EXPOSE 8080 8081
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"] 
