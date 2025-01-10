@@ -22,6 +22,7 @@ import (
 	"ai-gateway-ce/pkg/common"
 	"ai-gateway-ce/pkg/config"
 	"ai-gateway-ce/pkg/database"
+	"ai-gateway-ce/pkg/loadbalancer"
 	"ai-gateway-ce/pkg/models"
 	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/plugins"
@@ -39,8 +40,9 @@ type ProxyServer struct {
 	pluginCache   *common.TTLMap
 	skipAuthCheck bool
 	httpClient    *http.Client
-	loadBalancers sync.Map // map[string]*LoadBalancer
+	loadBalancers sync.Map // map[string]*loadbalancer.LoadBalancer
 	providers     map[string]config.ProviderConfig
+	lbFactory     loadbalancer.Factory
 }
 
 // Cache TTLs
@@ -75,6 +77,7 @@ func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Re
 		skipAuthCheck: skipAuthCheck,
 		httpClient:    &http.Client{},
 		providers:     config.Providers.Providers,
+		lbFactory:     loadbalancer.NewBaseFactory(),
 	}
 
 	// Subscribe to gateway events
@@ -644,7 +647,8 @@ func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.Forw
 			return nil, fmt.Errorf("upstream not found: %w", err)
 		}
 
-		lb, err := s.getLoadBalancer(upstreamModel)
+		// Create or get load balancer
+		lb, err := s.getOrCreateLoadBalancer(upstreamModel)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get load balancer: %w", err)
 		}
@@ -704,7 +708,22 @@ func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.Forw
 	}
 }
 
-func (s *ProxyServer) doForwardRequest(req *types.RequestContext, rule *types.ForwardingRule, target *types.UpstreamTarget, serviceType string, lb *LoadBalancer) (*types.ResponseContext, error) {
+// Add helper method to create or get load balancer
+func (s *ProxyServer) getOrCreateLoadBalancer(upstream *models.Upstream) (*loadbalancer.LoadBalancer, error) {
+	if lb, ok := s.loadBalancers.Load(upstream.ID); ok {
+		return lb.(*loadbalancer.LoadBalancer), nil
+	}
+
+	lb, err := loadbalancer.NewLoadBalancer(upstream, s.logger, s.cache)
+	if err != nil {
+		return nil, err
+	}
+
+	s.loadBalancers.Store(upstream.ID, lb)
+	return lb, nil
+}
+
+func (s *ProxyServer) doForwardRequest(req *types.RequestContext, rule *types.ForwardingRule, target *types.UpstreamTarget, serviceType string, lb *loadbalancer.LoadBalancer) (*types.ResponseContext, error) {
 	client := &fasthttp.Client{
 		ReadTimeout:  time.Second * 30,
 		WriteTimeout: time.Second * 30,
@@ -1037,16 +1056,6 @@ func (s *ProxyServer) subscribeToEvents() {
 			}
 		}
 	}
-}
-
-func (s *ProxyServer) getLoadBalancer(upstream *models.Upstream) (*LoadBalancer, error) {
-	if lb, ok := s.loadBalancers.Load(upstream.ID); ok {
-		return lb.(*LoadBalancer), nil
-	}
-
-	lb := NewLoadBalancer(upstream, s.logger, s.cache)
-	s.loadBalancers.Store(upstream.ID, lb)
-	return lb, nil
 }
 
 func (s *ProxyServer) transformRequestBody(body []byte, target *types.UpstreamTarget) ([]byte, error) {

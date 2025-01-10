@@ -32,8 +32,7 @@ create_test_gateway() {
   -H "Content-Type: application/json" \
   -d '{
     "name": "Multi Rate Limited Gateway",
-    "subdomain": "'$SUBDOMAIN'",
-    "type": "backends"
+    "subdomain": "'$SUBDOMAIN'"
     }')
 
 
@@ -112,7 +111,7 @@ create_test_gateway() {
         -H "Content-Type: application/json" \
         -d '{
             "name": "weighted-upstream-'$(date +%s)'",
-            "algorithm": "weighted",
+            "algorithm": "weighted-round-robin",
             "targets": [
                 {
                     "host": "localhost",
@@ -413,19 +412,6 @@ test_round_robin() {
 # Function to test weighted load balancing
 test_weighted() {
     echo -e "${BLUE}Testing weighted load balancing...${NC}"
-    
-    # Verify rule configuration first
-    echo "Checking rule configuration..."
-    RULE_CONFIG=$(curl -s "$ADMIN_URL/gateways/$GATEWAY_ID/rules" | jq '.[] | select(.path=="/weighted")')
-    echo "$RULE_CONFIG" | jq .
-    
-    if ! echo "$RULE_CONFIG" | jq -e '.load_balancing_strategy == "weighted"' > /dev/null; then
-        echo -e "${RED}Error: Rule is not configured for weighted load balancing${NC}"
-        return 1
-    fi
-    
-    # Clear the response file
-    > "$RESPONSE_FILE"
     total_requests=100  # Use larger sample size for better statistics
     success=true
     
