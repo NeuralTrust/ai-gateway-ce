@@ -2,19 +2,19 @@
 
 <div align="center">
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/neuraltrust/ai-gateway-ce)](https://goreportcard.com/report/github.com/neuraltrust/ai-gateway-ce)
+[![Go Report Card](https://goreportcard.com/badge/github.com/NeuralTrust/ai-gateway-ce)](https://goreportcard.com/report/github.com/NeuralTrust/ai-gateway-ce)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Go Reference](https://pkg.go.dev/badge/github.com/neuraltrust/ai-gateway-ce.svg)](https://pkg.go.dev/github.com/neuraltrust/ai-gateway-ce)
+[![Go Reference](https://pkg.go.dev/badge/github.com/NeuralTrust/ai-gateway-ce.svg)](https://pkg.go.dev/github.com/NeuralTrust/ai-gateway-ce)
 [![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/ai-gateway-ce.svg)](https://hub.docker.com/r/neuraltrust/ai-gateway-ce)
-[![Discord](https://img.shields.io/discord/1234567890?color=7289da&label=discord)](https://discord.gg/neuraltrust)
+[![Discord](https://img.shields.io/discord/1234567890?color=7289da&label=discord)](https://discord.gg/JGV4q3tr)
 
 <img src="docs/assets/logo.png" alt="AI Gateway Logo" width="300"/>
 
 *A powerful, multi-tenant API Gateway designed for AI service providers*
 
 [Documentation](https://docs.neuraltrust.ai) |
-[Quick Start](https://docs.neuraltrust.ai/quickstart) |
-[Community](https://discord.gg/neuraltrust)
+[Quick Start](https://docs.neuraltrust.ai/category/step-by-step-guide) |
+[Community](https://discord.gg/JGV4q3tr)
 
 </div>
 
@@ -24,9 +24,8 @@
 - 🔄 **Load Balancing**: Advanced algorithms including round-robin, weighted round-robin, and IP hash
 - 🔒 **Security**: Built-in authentication, rate limiting, and token management
 - 🔌 **Plugin System**: Extensible architecture for custom functionality
-- 📊 **Monitoring**: Comprehensive metrics and logging
 - ⚡ **Real-time Config**: Dynamic configuration without restarts
-- 🌐 **Multi-tenant**: Complete isolation between different tenants
+- 🌐 **Multi-gateway**: Complete isolation between different gateways
 - 🤖 **AI-Ready**: Optimized for AI model providers (OpenAI, Anthropic, etc.)
 
 ## 🚀 Quick Start
@@ -35,7 +34,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/neuraltrust/ai-gateway-ce.git
+git clone https://github.com/NeuralTrust/ai-gateway-ce.git
 cd ai-gateway-ce
 
 # Start the services
@@ -74,7 +73,6 @@ AI Gateway CE consists of two main components:
    - Request routing
    - Load balancing
    - Plugin execution
-   - Real-time metrics
 
 ## 🔌 Plugin System
 
@@ -90,40 +88,8 @@ type Plugin interface {
 
 Built-in plugins:
 - Rate Limiter
-- Token Counter
-- Request Validator
-- Response Transformer
-- Metrics Collector
-
-## 📊 Example Configuration
-
-```yaml
-server:
-  admin_port: 8080
-  proxy_port: 8081
-  base_domain: example.com
-
-redis:
-  host: localhost
-  port: 6379
-
-plugins:
-  rate_limiter:
-    enabled: true
-    limit: 100
-    window: "1m"
-```
-
-## 🌟 Enterprise Features
-
-Looking for more? Check out [AI Gateway Enterprise Edition](https://neuraltrust.ai/enterprise) with:
-
-- Advanced Load Balancing
-- Geographic Distribution
-- Custom Plugin Development
-- Priority Support
-- SLA Guarantees
-- Advanced Monitoring
+- Token Rate Limiter
+- External API Call
 
 ## 🤝 Contributing
 
@@ -142,14 +108,6 @@ AI Gateway CE is licensed under the Apache License 2.0 - see the [LICENSE](LICEN
 ## 🌟 Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=neuraltrust/ai-gateway-ce&type=Date)](https://star-history.com/#neuraltrust/ai-gateway-ce&Date)
-
-## 🙏 Acknowledgments
-
-Special thanks to our contributors and the following open-source projects:
-
-- [Go-Gin](https://github.com/gin-gonic/gin)
-- [Redis](https://redis.io)
-- [PostgreSQL](https://postgresql.org)
 
 ## 📫 Community & Support
 
