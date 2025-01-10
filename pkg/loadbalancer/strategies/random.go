@@ -2,7 +2,7 @@ package strategies
 
 import (
 	"ai-gateway-ce/pkg/types"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 )
 
