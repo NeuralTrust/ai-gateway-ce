@@ -80,6 +80,14 @@ func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Re
 		lbFactory:     loadbalancer.NewBaseFactory(),
 	}
 
+	// Register extra plugins
+	for _, plugin := range extraPlugins {
+		if err := manager.RegisterPlugin(plugin); err != nil {
+			logger.WithError(err).Errorf("Failed to register plugin: %s", plugin.Name())
+			continue // Skip failed plugin but continue with server creation
+		}
+	}
+
 	// Subscribe to gateway events
 	go s.subscribeToEvents()
 

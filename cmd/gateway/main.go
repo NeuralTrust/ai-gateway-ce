@@ -92,15 +92,15 @@ func main() {
 		logFile = "logs/proxy.log"
 	}
 
-	// Create logs directory if it doesn't exist
-	if err := os.MkdirAll("logs", 0755); err != nil {
+	// Create logs directory with more restrictive permissions
+	if err := os.MkdirAll("logs", 0750); err != nil {
 		log.Fatalf("Failed to create logs directory: %v", err)
 	}
 
-	// Open log file with sync writes
-	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	// Open log file with more restrictive permissions
+	file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
-		log.Fatalf("Failed to open log file %s: %v", logFile, err)
+		log.Fatalf("Failed to open log file: %v", err)
 	}
 	defer file.Close()
 

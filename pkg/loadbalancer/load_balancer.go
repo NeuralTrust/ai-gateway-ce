@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -36,7 +37,9 @@ func NewLoadBalancer(upstream *models.Upstream, logger *logrus.Logger, cache *ca
 	for i, t := range upstream.Targets {
 		var creds types.Credentials
 		if credBytes, err := json.Marshal(t.Credentials); err == nil {
-			json.Unmarshal(credBytes, &creds)
+			if err := json.Unmarshal(credBytes, &creds); err != nil {
+				log.Printf("Failed to unmarshal credentials: %v", err)
+			}
 		}
 
 		// Initialize health status
