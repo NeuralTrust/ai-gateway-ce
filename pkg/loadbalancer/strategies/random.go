@@ -25,7 +25,7 @@ func (r *Random) Next() *types.UpstreamTarget {
 		return nil
 	}
 
-	return &r.targets[rand.Intn(len(r.targets))]
+	return &r.targets[rand.IntN(len(r.targets))]
 }
 
 func (r *Random) Name() string {
