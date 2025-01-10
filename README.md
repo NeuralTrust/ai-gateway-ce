@@ -8,9 +8,9 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/ai-gateway-ce.svg)](https://hub.docker.com/r/neuraltrust/ai-gateway-ce)
 [![Discord](https://img.shields.io/discord/1234567890?color=7289da&label=discord)](https://discord.gg/JGV4q3tr)
 
-<img src="docs/assets/logo.png" alt="AI Gateway Logo" width="300"/>
+<img src="assets/ai-gateway.svg" alt="AI Gateway Logo" width="300"/>
 
-*A powerful, multi-tenant API Gateway designed for AI service providers*
+*A powerful, AI Gateway designed from scratch for AI*
 
 [Documentation](https://docs.neuraltrust.ai) |
 [Quick Start](https://docs.neuraltrust.ai/category/step-by-step-guide) |
