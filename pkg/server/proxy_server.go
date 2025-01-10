@@ -52,6 +52,30 @@ const (
 	PluginCacheTTL  = 30 * time.Minute
 )
 
+// Add helper function for safe type assertions
+func getContextValue[T any](ctx context.Context, key interface{}) (T, error) {
+	value := ctx.Value(key)
+	if value == nil {
+		var zero T
+		return zero, fmt.Errorf("value not found in context for key: %v", key)
+	}
+	result, ok := value.(T)
+	if !ok {
+		var zero T
+		return zero, fmt.Errorf("invalid type assertion for key: %v", key)
+	}
+	return result, nil
+}
+
+// Add helper function for safe type assertions if not already present
+func getGatewayDataFromCache(value interface{}) (*types.GatewayData, error) {
+	data, ok := value.(*types.GatewayData)
+	if !ok {
+		return nil, fmt.Errorf("invalid type assertion for gateway data")
+	}
+	return data, nil
+}
+
 func NewProxyServer(config *config.Config, cache *cache.Cache, repo *database.Repository, logger *logrus.Logger, skipAuthCheck bool, extraPlugins ...pluginiface.Plugin) *ProxyServer {
 	// Initialize plugins
 	plugins.InitializePlugins(cache, logger)
@@ -110,8 +134,9 @@ func (s *ProxyServer) Run() error {
 		// Create a new fasthttp context
 		fctx := fasthttp.RequestCtx{}
 		// Store both fasthttp context and the response writer
-		ctx := context.WithValue(c.Request.Context(), "fasthttp", &fctx)
-		ctx = context.WithValue(ctx, "http_response_writer", c.Writer)
+		ctx := context.WithValue(c.Request.Context(), common.LoggerKey, s.logger)
+		ctx = context.WithValue(ctx, common.FastHTTPKey, &fctx)
+		ctx = context.WithValue(ctx, common.ResponseWriterKey, c.Writer)
 		c.Request = c.Request.WithContext(ctx)
 		c.Next()
 	})
@@ -164,18 +189,27 @@ func (s *ProxyServer) Run() error {
 
 func (s *ProxyServer) HandleForward(c *gin.Context) {
 	// Add logger to context
-	ctx := context.WithValue(c.Request.Context(), "logger", s.logger)
+	ctx := context.WithValue(c.Request.Context(), common.LoggerKey, s.logger)
 
 	path := c.Request.URL.Path
 	method := c.Request.Method
 
 	// Get gateway ID from context
-	gatewayID, exists := c.Get(middleware.GatewayContextKey)
+	gatewayIDAny, exists := c.Get(middleware.GatewayContextKey)
 	if !exists {
-		s.logger.Error("Gateway ID not found in context")
+		s.logger.Error("Gateway ID not found in gin context")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
+	gatewayID, ok := gatewayIDAny.(string)
+	if !ok {
+		s.logger.Error("Gateway ID not found in gin context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
+	s.logger.WithFields(logrus.Fields{
+		"gatewayID": gatewayID,
+	}).Debug("Gateway ID")
 
 	// Get metadata from gin context
 	var metadata map[string]interface{}
@@ -192,11 +226,17 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 		}
 	}
 
+	fastCtx, err := getContextValue[*fasthttp.RequestCtx](c.Request.Context(), common.FastHTTPKey)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to get FastHTTP context")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
+		return
+	}
 	// Create the RequestContext
 	reqCtx := &types.RequestContext{
 		Context:     ctx,
-		FasthttpCtx: c.Request.Context().Value("fasthttp").(*fasthttp.RequestCtx),
-		GatewayID:   gatewayID.(string),
+		FasthttpCtx: fastCtx,
+		GatewayID:   gatewayID,
 		Headers:     make(map[string][]string),
 		Method:      method,
 		Path:        path,
@@ -225,13 +265,13 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 	// Create the ResponseContext
 	respCtx := &types.ResponseContext{
 		Context:   ctx,
-		GatewayID: gatewayID.(string),
+		GatewayID: gatewayID,
 		Headers:   make(map[string][]string),
 		Metadata:  make(map[string]interface{}),
 	}
 
 	// Get gateway data with plugins
-	gatewayData, err := s.getGatewayData(ctx, gatewayID.(string))
+	gatewayData, err := s.getGatewayData(ctx, gatewayID)
 	s.logger.WithFields(logrus.Fields{
 		"gatewayData": gatewayData,
 	}).Debug("Gateway data")
@@ -306,7 +346,7 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 	}
 
 	// Execute pre-request plugins
-	if _, err := s.pluginManager.ExecuteStage(ctx, types.PreRequest, gatewayID.(string), matchingRule.ID, reqCtx, respCtx); err != nil {
+	if _, err := s.pluginManager.ExecuteStage(ctx, types.PreRequest, gatewayID, matchingRule.ID, reqCtx, respCtx); err != nil {
 		if pluginErr, ok := err.(*types.PluginError); ok {
 			// Copy headers from response context
 			for k, values := range respCtx.Headers {
@@ -361,7 +401,7 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 	}
 
 	// Execute pre-response plugins
-	if _, err := s.pluginManager.ExecuteStage(ctx, types.PreResponse, gatewayID.(string), matchingRule.ID, reqCtx, respCtx); err != nil {
+	if _, err := s.pluginManager.ExecuteStage(ctx, types.PreResponse, gatewayID, matchingRule.ID, reqCtx, respCtx); err != nil {
 		if pluginErr, ok := err.(*types.PluginError); ok {
 			// Copy headers from response context
 			for k, values := range respCtx.Headers {
@@ -380,7 +420,7 @@ func (s *ProxyServer) HandleForward(c *gin.Context) {
 	}
 
 	// Execute post-response plugins
-	if _, err := s.pluginManager.ExecuteStage(ctx, types.PostResponse, gatewayID.(string), matchingRule.ID, reqCtx, respCtx); err != nil {
+	if _, err := s.pluginManager.ExecuteStage(ctx, types.PostResponse, gatewayID, matchingRule.ID, reqCtx, respCtx); err != nil {
 		if pluginErr, ok := err.(*types.PluginError); ok {
 			// Copy headers from response context
 			s.logger.WithFields(logrus.Fields{
@@ -469,15 +509,24 @@ func (s *ProxyServer) configurePlugins(gateway *types.Gateway, rule *types.Forwa
 }
 
 func (s *ProxyServer) getGatewayData(ctx context.Context, gatewayID string) (*types.GatewayData, error) {
-	logger := ctx.Value("logger").(*logrus.Logger)
-
-	// 1. Try memory cache first
-	if cached, ok := s.gatewayCache.Get(gatewayID); ok {
-		logger.WithField("fromCache", "memory").Debug("Gateway data found in memory cache")
-		return cached.(*types.GatewayData), nil
+	logger, err := getContextValue[*logrus.Logger](ctx, common.LoggerKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get logger: %w", err)
 	}
 
-	// 2. Try Redis cache
+	// Try memory cache first
+	if cached, ok := s.gatewayCache.Get(gatewayID); ok {
+		logger.WithField("fromCache", "memory").Debug("Gateway data found in memory cache")
+		data, err := getGatewayDataFromCache(cached)
+		if err != nil {
+			logger.WithError(err).Error("Failed to get gateway data from cache")
+			// Continue to try Redis cache
+		} else {
+			return data, nil
+		}
+	}
+
+	// Try Redis cache
 	gatewayData, err := s.getGatewayDataFromRedis(ctx, gatewayID)
 	if err == nil {
 		logger.WithFields(logrus.Fields{
@@ -492,7 +541,7 @@ func (s *ProxyServer) getGatewayData(ctx context.Context, gatewayID string) (*ty
 	}
 	logger.WithError(err).Debug("Failed to get gateway data from Redis")
 
-	// 3. Fallback to database
+	// Fallback to database
 	return s.getGatewayDataFromDB(ctx, gatewayID)
 }
 
@@ -528,7 +577,10 @@ func (s *ProxyServer) getGatewayDataFromRedis(ctx context.Context, gatewayID str
 }
 
 func (s *ProxyServer) getGatewayDataFromDB(ctx context.Context, gatewayID string) (*types.GatewayData, error) {
-	logger := ctx.Value("logger").(*logrus.Logger)
+	logger, err := getContextValue[*logrus.Logger](ctx, common.LoggerKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get logger: %w", err)
+	}
 
 	// Get gateway from database
 	gateway, err := s.repo.GetGateway(ctx, gatewayID)
@@ -613,12 +665,35 @@ func convertModelToTypesGateway(g *models.Gateway) *types.Gateway {
 	}
 }
 
+func getJSONBytes(value interface{}) ([]byte, error) {
+	switch v := value.(type) {
+	case []byte:
+		return v, nil
+	case string:
+		return []byte(v), nil
+	case json.RawMessage:
+		return []byte(v), nil
+	default:
+		// Try to marshal the value to JSON if it's not already in byte form
+		bytes, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal value to JSON bytes: %w", err)
+		}
+		return bytes, nil
+	}
+}
+
 func convertModelToTypesRules(rules []models.ForwardingRule) []types.ForwardingRule {
 	var result []types.ForwardingRule
 	for _, r := range rules {
 		var pluginChain []types.PluginConfig
-		jsonBytes, _ := r.PluginChain.Value()
-		if err := json.Unmarshal(jsonBytes.([]byte), &pluginChain); err != nil {
+
+		jsonBytes, err := getJSONBytes(r.PluginChain)
+		if err != nil {
+			return []types.ForwardingRule{}
+		}
+
+		if err := json.Unmarshal(jsonBytes, &pluginChain); err != nil {
 			pluginChain = []types.PluginConfig{} // fallback to empty slice on error
 		}
 
@@ -719,7 +794,9 @@ func (s *ProxyServer) forwardRequest(req *types.RequestContext, rule *types.Forw
 // Add helper method to create or get load balancer
 func (s *ProxyServer) getOrCreateLoadBalancer(upstream *models.Upstream) (*loadbalancer.LoadBalancer, error) {
 	if lb, ok := s.loadBalancers.Load(upstream.ID); ok {
-		return lb.(*loadbalancer.LoadBalancer), nil
+		if lb, ok := lb.(*loadbalancer.LoadBalancer); ok {
+			return lb, nil
+		}
 	}
 
 	lb, err := loadbalancer.NewLoadBalancer(upstream, s.logger, s.cache)
@@ -897,7 +974,7 @@ func (s *ProxyServer) handleStreamingResponse(req *types.RequestContext, target 
 		}, nil
 	}
 
-	if w, ok := req.Context.Value("http_response_writer").(http.ResponseWriter); ok {
+	if w, ok := req.Context.Value(common.ResponseWriterKey).(http.ResponseWriter); ok {
 		// Copy response headers
 		for k, v := range resp.Header {
 			for _, val := range v {

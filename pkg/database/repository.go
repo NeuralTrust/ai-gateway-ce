@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/common"
 	"ai-gateway-ce/pkg/models"
 	"ai-gateway-ce/pkg/types"
 
@@ -80,7 +81,7 @@ func (r *Repository) IsValidAPIKeyFast(gatewayID, apiKey string) bool {
 // Gateway operations
 func (r *Repository) CreateGateway(ctx context.Context, gateway *models.Gateway) error {
 	// Add repository as cacher to context
-	ctx = context.WithValue(ctx, "cacher", r)
+	ctx = context.WithValue(ctx, common.CacherKey, r)
 	return r.db.WithContext(ctx).Create(gateway).Error
 }
 

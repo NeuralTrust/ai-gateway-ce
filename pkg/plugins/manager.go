@@ -385,8 +385,3 @@ func (m *Manager) GetPlugin(name string) pluginiface.Plugin {
 	defer m.mu.RUnlock()
 	return m.plugins[name]
 }
-
-// Add this helper function to generate a unique plugin ID
-func generatePluginID(gatewayID string, pluginName string, index int) string {
-	return fmt.Sprintf("%s-%s-%d", gatewayID, pluginName, index)
-}

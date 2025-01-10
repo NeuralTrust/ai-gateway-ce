@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"ai-gateway-ce/pkg/common"
 	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/types"
 
@@ -84,7 +85,10 @@ func (v *ExternalApiValidator) ValidateConfig(config types.PluginConfig) error {
 }
 
 func (v *ExternalApiPlugin) Execute(ctx context.Context, cfg types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
-	logger := ctx.Value("logger").(*logrus.Logger)
+	logger, err := getContextValue[*logrus.Logger](ctx, common.LoggerKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get logger: %w", err)
+	}
 
 	settings := cfg.Settings
 	if settings == nil {
@@ -126,10 +130,19 @@ func (v *ExternalApiPlugin) Execute(ctx context.Context, cfg types.PluginConfig,
 	if maps, ok := settings["field_maps"].([]interface{}); ok {
 		for _, m := range maps {
 			if mapData, ok := m.(map[string]interface{}); ok {
-				fieldMap := FieldMap{
-					Source:      mapData["source"].(string),
-					Destination: mapData["destination"].(string),
+				fieldMap := FieldMap{}
+				source, err := getStringFromMap(mapData, "source")
+				if err != nil {
+					return nil, fmt.Errorf("invalid source: %w", err)
 				}
+				fieldMap.Source = source
+
+				destination, err := getStringFromMap(mapData, "destination")
+				if err != nil {
+					return nil, fmt.Errorf("invalid destination: %w", err)
+				}
+				fieldMap.Destination = destination
+
 				fieldMaps = append(fieldMaps, fieldMap)
 			}
 		}
@@ -140,12 +153,25 @@ func (v *ExternalApiPlugin) Execute(ctx context.Context, cfg types.PluginConfig,
 	if conds, ok := settings["conditions"].([]interface{}); ok {
 		for _, c := range conds {
 			if condMap, ok := c.(map[string]interface{}); ok {
-				condition := Condition{
-					Field:    condMap["field"].(string),
-					Operator: condMap["operator"].(string),
-					Value:    condMap["value"],
-					StopFlow: condMap["stop_flow"].(bool),
+				condition := Condition{}
+				field, err := getStringFromMap(condMap, "field")
+				if err != nil {
+					return nil, fmt.Errorf("invalid field: %w", err)
 				}
+				condition.Field = field
+
+				operator, err := getStringFromMap(condMap, "operator")
+				if err != nil {
+					return nil, fmt.Errorf("invalid operator: %w", err)
+				}
+				condition.Operator = operator
+
+				stopFlow, err := getBoolFromMap(condMap, "stop_flow")
+				if err != nil {
+					return nil, fmt.Errorf("invalid stop_flow: %w", err)
+				}
+				condition.StopFlow = stopFlow
+
 				if msg, ok := condMap["message"].(string); ok {
 					condition.Message = msg
 				}
@@ -266,4 +292,37 @@ func evaluateCondition(actual interface{}, operator string, expected interface{}
 	default:
 		return false
 	}
+}
+
+// Add helper function for safe type assertions
+func getContextValue[T any](ctx context.Context, key interface{}) (T, error) {
+	value := ctx.Value(key)
+	if value == nil {
+		var zero T
+		return zero, fmt.Errorf("value not found in context for key: %v", key)
+	}
+	result, ok := value.(T)
+	if !ok {
+		var zero T
+		return zero, fmt.Errorf("invalid type assertion for key: %v", key)
+	}
+	return result, nil
+}
+
+// For map assertions
+func getStringFromMap(data map[string]interface{}, key string) (string, error) {
+	value, ok := data[key].(string)
+	if !ok {
+		return "", fmt.Errorf("invalid type assertion for key: %v", key)
+	}
+	return value, nil
+}
+
+// Add helper function for safe bool assertions
+func getBoolFromMap(data map[string]interface{}, key string) (bool, error) {
+	value, ok := data[key].(bool)
+	if !ok {
+		return false, fmt.Errorf("invalid type assertion for key: %v", key)
+	}
+	return value, nil
 }

@@ -2,7 +2,9 @@ package middleware
 
 import (
 	"ai-gateway-ce/pkg/cache"
+	"ai-gateway-ce/pkg/common"
 	"ai-gateway-ce/pkg/database"
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -84,9 +86,6 @@ func (m *GatewayMiddleware) IdentifyGateway() gin.HandlerFunc {
 				if err != nil {
 					m.logger.WithFields(logrus.Fields{
 						"subdomain": subdomain,
-						"key":       key,
-						"host":      host,
-						"path":      c.Request.URL.Path,
 						"error":     err.Error(),
 					}).Error("Gateway not found in database")
 					c.JSON(404, gin.H{"error": "Gateway not found"})
@@ -94,34 +93,30 @@ func (m *GatewayMiddleware) IdentifyGateway() gin.HandlerFunc {
 					return
 				}
 
-				// Cache the gateway ID for future requests
+				gatewayID = gateway.ID
+				// Cache the gateway ID
 				if err := m.cache.Set(c.Request.Context(), key, gateway.ID, 24*time.Hour); err != nil {
 					m.logger.WithError(err).Error("Failed to cache gateway ID")
-					// Continue anyway as we found the gateway
 				}
-
-				gatewayID = gateway.ID
 			} else {
-				m.logger.WithFields(logrus.Fields{
-					"error":     err.Error(),
-					"subdomain": subdomain,
-					"key":       key,
-					"host":      host,
-				}).Error("Failed to get gateway ID")
+				m.logger.WithError(err).Error("Failed to get gateway ID")
 				c.JSON(500, gin.H{"error": "Internal server error"})
 				c.Abort()
 				return
 			}
 		}
 
+		// Set gateway ID in both gin context and request context
+		c.Set(GatewayContextKey, gatewayID)
+		ctx := context.WithValue(c.Request.Context(), common.GatewayContextKey, gatewayID)
+		c.Request = c.Request.WithContext(ctx)
+
 		m.logger.WithFields(logrus.Fields{
 			"subdomain": subdomain,
 			"gatewayID": gatewayID,
-			"host":      host,
 			"path":      c.Request.URL.Path,
 		}).Debug("Found gateway")
 
-		c.Set(GatewayContextKey, gatewayID)
 		c.Next()
 	}
 }

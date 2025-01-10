@@ -4,13 +4,13 @@ server:
   base_domain: example.com
 
 redis:
-  host: redis
+  host: localhost
   port: 6379
   password: ""
   db: 0
 
 database:
-  host: postgres
+  host: localhost
   port: 5432
   user: postgres
   password: postgres

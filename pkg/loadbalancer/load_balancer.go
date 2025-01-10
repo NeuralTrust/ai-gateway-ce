@@ -15,13 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const (
-	defaultHealthCheckInterval = 10 * time.Second
-	defaultHealthCheckTimeout  = 5 * time.Second
-	defaultHealthyThreshold    = 2
-	defaultUnhealthyThreshold  = 3
-)
-
 type LoadBalancer struct {
 	mu         sync.RWMutex
 	strategy   Strategy
@@ -51,7 +44,9 @@ func NewLoadBalancer(upstream *models.Upstream, logger *logrus.Logger, cache *ca
 		// Store initial health status in cache
 		key := fmt.Sprintf("lb:health:%s:%s", upstream.ID, t.ID)
 		if statusJSON, err := json.Marshal(healthStatus); err == nil {
-			cache.Set(context.Background(), key, string(statusJSON), time.Hour)
+			if err := cache.Set(context.Background(), key, string(statusJSON), time.Hour); err != nil {
+				return nil, fmt.Errorf("failed to set cache: %w", err)
+			}
 		}
 
 		targets[i] = types.UpstreamTarget{
@@ -108,7 +103,7 @@ func (lb *LoadBalancer) NextTarget(ctx context.Context) (*types.UpstreamTarget, 
 	return lb.fallbackTarget(ctx)
 }
 
-// Add all the health check methods from the original load balancer
+// UpdateTargetHealth updates the target's health status
 func (lb *LoadBalancer) UpdateTargetHealth(target *types.UpstreamTarget, healthy bool, err error) {
 	if lb.upstream.HealthChecks == nil || !lb.upstream.HealthChecks.Passive {
 		return

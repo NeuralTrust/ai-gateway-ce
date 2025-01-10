@@ -53,7 +53,11 @@ func NewCache(config common.CacheConfig, db *gorm.DB) (*Cache, error) {
 
 func (c *Cache) Get(ctx context.Context, key string) (string, error) {
 	if value, ok := c.localCache.Load(key); ok {
-		return value.(string), nil
+		str, err := safeStringCast(value)
+		if err != nil {
+			return "", fmt.Errorf("cache value error: %w", err)
+		}
+		return str, nil
 	}
 	return c.client.Get(ctx, key).Result()
 }
@@ -86,7 +90,11 @@ func (c *Cache) CreateTTLMap(name string, ttl time.Duration) *common.TTLMap {
 
 func (c *Cache) GetTTLMap(name string) *common.TTLMap {
 	if value, ok := c.ttlMaps.Load(name); ok {
-		return value.(*common.TTLMap)
+		ttlMap, err := safeTTLMapCast(value)
+		if err != nil {
+			return nil
+		}
+		return ttlMap
 	}
 	return nil
 }
@@ -122,4 +130,20 @@ func (c *Cache) SaveService(ctx context.Context, gatewayID string, service *mode
 	// Invalidate services list cache
 	servicesKey := fmt.Sprintf(ServicesKeyPattern, gatewayID)
 	return c.Delete(ctx, servicesKey)
+}
+
+func safeStringCast(value interface{}) (string, error) {
+	str, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("invalid type assertion to string")
+	}
+	return str, nil
+}
+
+func safeTTLMapCast(value interface{}) (*common.TTLMap, error) {
+	ttlMap, ok := value.(*common.TTLMap)
+	if !ok {
+		return nil, fmt.Errorf("invalid type assertion to TTLMap")
+	}
+	return ttlMap, nil
 }

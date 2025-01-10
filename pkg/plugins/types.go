@@ -17,8 +17,7 @@ type PluginContext struct {
 
 // BasePlugin provides common functionality for all plugins
 type BasePlugin struct {
-	name   string
-	logger *logrus.Logger
+	name string
 }
 
 func (p *BasePlugin) GetName() string {

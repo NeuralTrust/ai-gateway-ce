@@ -10,20 +10,10 @@ import (
 var (
 	// FastHTTP client for better performance
 	fastClient = &fasthttp.Client{
-		MaxConnsPerHost:               5000,
-		ReadTimeout:                   5 * time.Second,
-		WriteTimeout:                  5 * time.Second,
-		MaxIdleConnDuration:           60 * time.Second,
-		MaxConnDuration:               60 * time.Second,
-		MaxResponseBodySize:           10 * 1024 * 1024,
-		NoDefaultUserAgentHeader:      true,
-		DisableHeaderNamesNormalizing: true,
-		DisablePathNormalizing:        true,
+		MaxConnsPerHost: 10000,
+		ReadTimeout:     10 * time.Second,
+		WriteTimeout:    10 * time.Second,
 	}
-
-	// Request pools
-	requestPool  = &fasthttp.RequestCtx{}
-	responsePool = &fasthttp.Response{}
 
 	// Buffer pool for response bodies
 	bufferPool = sync.Pool{

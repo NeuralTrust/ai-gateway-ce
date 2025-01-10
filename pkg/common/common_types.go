@@ -99,7 +99,11 @@ type CacheConfig struct {
 // Get retrieves a value from cache
 func (c *CacheImpl) Get(ctx context.Context, key string) (string, error) {
 	if value, ok := c.LocalCache.Load(key); ok {
-		return value.(string), nil
+		str, ok := value.(string)
+		if !ok {
+			return "", fmt.Errorf("invalid type assertion to string")
+		}
+		return str, nil
 	}
 	return c.redisClient.Get(ctx, key).Result()
 }

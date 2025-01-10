@@ -11,6 +11,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/sirupsen/logrus"
 
+	"ai-gateway-ce/pkg/common"
 	"ai-gateway-ce/pkg/pluginiface"
 	"ai-gateway-ce/pkg/types"
 )
@@ -74,7 +75,7 @@ func (p *TokenRateLimiterPlugin) AllowedStages() []types.Stage {
 func (p *TokenRateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginConfig, req *types.RequestContext, resp *types.ResponseContext) (*types.PluginResponse, error) {
 	// Create a context with timeout and stage information
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	ctx = context.WithValue(ctx, "stage", req.Stage)
+	ctx = context.WithValue(ctx, common.StageKey, req.Stage)
 	defer cancel()
 
 	// Try to acquire the lock with context
@@ -105,17 +106,13 @@ func (p *TokenRateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginCo
 	}
 
 	// Get API key from context
-	apiKey, exists := req.Metadata["api_key"]
-	if !exists {
-		p.logger.Error("API key not found in request context")
-		return nil, &types.PluginError{
-			StatusCode: 401,
-			Message:    "API key required for token rate limiting",
-		}
+	apiKey, ok := req.Metadata["api_key"].(string)
+	if !ok {
+		return nil, fmt.Errorf("api_key not found or invalid type")
 	}
 
 	// Calculate token bucket key
-	bucketKey := fmt.Sprintf("token_bucket:%s:%s", cfg.ID, apiKey.(string))
+	bucketKey := fmt.Sprintf("token_bucket:%s:%s", cfg.ID, apiKey)
 
 	// Get current bucket state
 	bucket, err := p.getBucketState(ctx, bucketKey, config)
@@ -134,7 +131,10 @@ func (p *TokenRateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginCo
 		}
 
 		tokensToReserve := config.TokensPerRequest
-		isStreaming, _ := requestBody["stream"].(bool)
+		isStreaming, ok := requestBody["stream"].(bool)
+		if !ok {
+			isStreaming = false // default value
+		}
 
 		// Check both tokens and requests limits
 		if bucket.Tokens < tokensToReserve {
@@ -234,7 +234,10 @@ func (p *TokenRateLimiterPlugin) Execute(ctx context.Context, cfg types.PluginCo
 		if err := json.Unmarshal(req.Body, &requestBody); err != nil {
 			return nil, fmt.Errorf("failed to parse request body: %w", err)
 		}
-		isStreaming, _ := requestBody["stream"].(bool)
+		isStreaming, ok := requestBody["stream"].(bool)
+		if !ok {
+			isStreaming = false // default value
+		}
 		if isStreaming {
 			if tokenUsage, ok := req.Metadata["token_usage"].(map[string]interface{}); ok {
 				tokensToConsume := config.TokensPerRequest // default fallback

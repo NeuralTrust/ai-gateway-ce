@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -30,7 +31,9 @@ import (
 var validate = validator.New()
 
 func init() {
-	validate.RegisterValidation("subdomain", validateSubdomainField)
+	if err := validate.RegisterValidation("subdomain", validateSubdomainField); err != nil {
+		log.Fatalf("Failed to register subdomain validation: %v", err)
+	}
 }
 
 func validateSubdomainField(fl validator.FieldLevel) bool {
@@ -67,7 +70,9 @@ func NewAdminServer(config *config.Config, cache *cache.Cache, repo *database.Re
 
 	// Register extra plugins
 	for _, plugin := range eePlugins {
-		plugins.GetManager().RegisterPlugin(plugin)
+		if err := plugins.GetManager().RegisterPlugin(plugin); err != nil {
+			logger.WithError(err).Error("Failed to register plugin")
+		}
 	}
 
 	return &AdminServer{
@@ -394,7 +399,9 @@ func (s *AdminServer) updateGateway(c *gin.Context) {
 	}
 
 	// Invalidate caches
-	s.invalidateCaches(dbGateway.ID)
+	if err := s.invalidateCaches(c.Request.Context(), dbGateway.ID); err != nil {
+		s.logger.WithError(err).Error("Failed to invalidate caches")
+	}
 
 	c.JSON(http.StatusOK, response)
 }
@@ -559,14 +566,15 @@ func validateGatewayID(id string) error {
 	return nil
 }
 
-func (s *AdminServer) getRuleResponse(rule *models.ForwardingRule) types.ForwardingRule {
+func (s *AdminServer) getRuleResponse(rule *models.ForwardingRule) (types.ForwardingRule, error) {
 	var pluginChain []types.PluginConfig
 	if rule.PluginChain != nil {
-		// Convert JSONMap directly to []PluginConfig
-		chainJSON, _ := json.Marshal(rule.PluginChain)
+		chainJSON, err := json.Marshal(rule.PluginChain)
+		if err != nil {
+			return types.ForwardingRule{}, fmt.Errorf("failed to marshal plugin chain: %w", err)
+		}
 		if err := json.Unmarshal(chainJSON, &pluginChain); err != nil {
-			s.logger.WithError(err).Error("Failed to unmarshal plugin chain")
-			pluginChain = make([]types.PluginConfig, 0)
+			return types.ForwardingRule{}, fmt.Errorf("failed to unmarshal plugin chain: %w", err)
 		}
 	}
 
@@ -594,7 +602,7 @@ func (s *AdminServer) getRuleResponse(rule *models.ForwardingRule) types.Forward
 		Public:        rule.Public,
 		CreatedAt:     rule.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:     rule.UpdatedAt.Format(time.RFC3339),
-	}
+	}, nil
 }
 
 // Rule management methods
@@ -663,7 +671,12 @@ func (s *AdminServer) createRule(c *gin.Context) {
 	}
 
 	// Use existing helper to convert to API response
-	response := s.getRuleResponse(dbRule)
+	response, err := s.getRuleResponse(dbRule)
+	if err != nil {
+		s.logger.WithError(err).Error("Failed to get rule response")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process rule"})
+		return
+	}
 
 	c.JSON(http.StatusCreated, response)
 }
@@ -784,14 +797,14 @@ func (s *AdminServer) updateRule(c *gin.Context) {
 				rules[i].RetryAttempts = *req.RetryAttempts
 			}
 			if req.PluginChain != nil {
-				pluginChainBytes, err := json.Marshal(req.PluginChain)
+				chainJSON, err := json.Marshal(req.PluginChain)
 				if err != nil {
 					s.logger.WithError(err).Error("Failed to marshal plugin chain")
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin chain"})
 					return
 				}
 				var pluginChain []types.PluginConfig
-				if err := json.Unmarshal(pluginChainBytes, &pluginChain); err != nil {
+				if err := json.Unmarshal(chainJSON, &pluginChain); err != nil {
 					s.logger.WithError(err).Error("Failed to unmarshal plugin chain")
 					c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process plugin chain"})
 					return
@@ -924,16 +937,29 @@ func convertMapToDBHeaders(headers map[string]string) map[string]string {
 	return result
 }
 
-func (s *AdminServer) invalidateCaches(gatewayID string) {
+func (s *AdminServer) invalidateCaches(ctx context.Context, gatewayID string) error {
+	// Get cache keys
 	keys := common.GetCacheKeys(gatewayID)
 
-	// Clear Redis caches (affects all replicas)
-	s.cache.Delete(context.Background(), keys.Gateway)
-	s.cache.Delete(context.Background(), keys.Rules)
-	s.cache.Delete(context.Background(), keys.Plugin)
+	// Delete cache entries and handle errors
+	if err := s.cache.Delete(ctx, keys.Gateway); err != nil {
+		return fmt.Errorf("failed to delete gateway cache: %w", err)
+	}
+
+	if err := s.cache.Delete(ctx, keys.Rules); err != nil {
+		return fmt.Errorf("failed to delete rules cache: %w", err)
+	}
+
+	if err := s.cache.Delete(ctx, keys.Plugin); err != nil {
+		return fmt.Errorf("failed to delete plugin cache: %w", err)
+	}
 
 	// Publish cache invalidation event
-	s.cache.Client().Publish(context.Background(), "cache:invalidate", gatewayID)
+	if err := s.publishCacheInvalidation(ctx, gatewayID); err != nil {
+		return fmt.Errorf("failed to publish cache invalidation: %w", err)
+	}
+
+	return nil
 }
 
 func (s *AdminServer) publishCacheInvalidation(ctx context.Context, gatewayID string) error {
@@ -1213,59 +1239,6 @@ func (s *AdminServer) createService(c *gin.Context) {
 	c.JSON(http.StatusCreated, service)
 }
 
-// Update forwarding rule handler to work with services
-func (s *AdminServer) createForwardingRule(c *gin.Context) {
-	gatewayID := c.Param("id")
-	var rule models.ForwardingRule
-
-	if err := c.ShouldBindJSON(&rule); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Verify gateway exists
-	if _, err := s.repo.GetGateway(c.Request.Context(), gatewayID); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Gateway not found"})
-		return
-	}
-
-	// Verify service exists
-	if _, err := s.repo.GetService(c.Request.Context(), rule.ServiceID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid service_id"})
-		return
-	}
-
-	rule.GatewayID = gatewayID
-
-	if err := s.repo.CreateRule(c.Request.Context(), &rule); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Update cache if needed
-	if err := s.updateRulesCache(c.Request.Context(), gatewayID); err != nil {
-		s.logger.Error("Failed to update rules cache", "error", err)
-	}
-
-	c.JSON(http.StatusCreated, rule)
-}
-
-// Helper function to update rules cache
-func (s *AdminServer) updateRulesCache(ctx context.Context, gatewayID string) error {
-	rules, err := s.repo.ListRules(ctx, gatewayID)
-	if err != nil {
-		return err
-	}
-
-	// Convert to API types
-	apiRules := make([]types.ForwardingRule, len(rules))
-	for i, rule := range rules {
-		apiRules[i] = convertToAPIRule(rule)
-	}
-
-	return s.repo.UpdateRulesCache(ctx, gatewayID, rules)
-}
-
 func (s *AdminServer) listServices(c *gin.Context) {
 	gatewayID := c.Param("gateway_id")
 	offset := 0
@@ -1374,39 +1347,4 @@ func (s *AdminServer) deleteService(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
-}
-
-// Add cache invalidation when deleting resources
-func (s *AdminServer) invalidateGatewayCache(ctx context.Context, gatewayID string) {
-	keys := []string{
-		fmt.Sprintf(cache.GatewayKeyPattern, gatewayID),
-		fmt.Sprintf(cache.RulesKeyPattern, gatewayID),
-		fmt.Sprintf(cache.UpstreamsKeyPattern, gatewayID),
-		fmt.Sprintf(cache.ServicesKeyPattern, gatewayID),
-	}
-
-	for _, key := range keys {
-		if err := s.cache.Delete(ctx, key); err != nil {
-			s.logger.WithError(err).WithField("key", key).Error("Failed to invalidate cache")
-		}
-	}
-
-	// Publish cache invalidation event for other instances
-	s.publishCacheInvalidation(ctx, gatewayID)
-}
-
-func convertToAPIRule(rule models.ForwardingRule) types.ForwardingRule {
-	return types.ForwardingRule{
-		ID:        rule.ID,
-		GatewayID: rule.GatewayID,
-		ServiceID: rule.ServiceID,
-		Path:      rule.Path,
-		Methods:   rule.Methods,
-		Headers:   rule.Headers,
-		StripPath: rule.StripPath,
-		Active:    rule.Active,
-		Public:    rule.Public,
-		CreatedAt: rule.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: rule.UpdatedAt.Format(time.RFC3339),
-	}
 }
