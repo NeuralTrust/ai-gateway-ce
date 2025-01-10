@@ -8,7 +8,7 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/ai-gateway-ce.svg)](https://hub.docker.com/r/neuraltrust/ai-gateway-ce)
 [![Discord](https://img.shields.io/discord/1234567890?color=7289da&label=discord)](https://discord.gg/JGV4q3tr)
 
-<img src="assets/ai-gateway.svg" alt="AI Gateway Logo" width="500"/>
+<img src="assets/ai-gateway.svg" alt="AI Gateway Logo" width="100%"/>
 
 *A powerful, AI Gateway designed from scratch for AI*
 
