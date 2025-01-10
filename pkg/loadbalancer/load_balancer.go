@@ -136,11 +136,19 @@ func (lb *LoadBalancer) UpdateTargetHealth(target *types.UpstreamTarget, healthy
 				LastError: err,
 				Failures:  int(failures),
 			}
-			statusJSON, _ := json.Marshal(status)
-			lb.cache.Set(context.Background(), key, string(statusJSON), time.Hour)
+			statusJSON, err := json.Marshal(status)
+			if err != nil {
+				lb.logger.WithError(err).Error("Failed to marshal health status")
+				return
+			}
+			if err := lb.cache.Set(context.Background(), key, string(statusJSON), time.Hour); err != nil {
+				lb.logger.WithError(err).Error("Failed to cache health status")
+			}
 		}
 	} else {
-		lb.cache.Delete(context.Background(), failuresKey)
+		if err := lb.cache.Delete(context.Background(), failuresKey); err != nil {
+			lb.logger.WithError(err).Error("Failed to delete failures key")
+		}
 
 		status := &types.HealthStatus{
 			Healthy:   true,
@@ -148,8 +156,14 @@ func (lb *LoadBalancer) UpdateTargetHealth(target *types.UpstreamTarget, healthy
 			LastError: nil,
 			Failures:  0,
 		}
-		statusJSON, _ := json.Marshal(status)
-		lb.cache.Set(context.Background(), key, string(statusJSON), time.Hour)
+		statusJSON, err := json.Marshal(status)
+		if err != nil {
+			lb.logger.WithError(err).Error("Failed to marshal health status")
+			return
+		}
+		if err := lb.cache.Set(context.Background(), key, string(statusJSON), time.Hour); err != nil {
+			lb.logger.WithError(err).Error("Failed to cache health status")
+		}
 	}
 }
 
