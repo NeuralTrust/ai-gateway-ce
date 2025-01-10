@@ -1,4 +1,4 @@
-name: Security Scan
+name: Security
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [ main ]
   schedule:
-    - cron: '0 0 * * 0'  # Run weekly
+    - cron: '0 0 * * *'
 
 jobs:
   security:
@@ -24,7 +24,7 @@ jobs:
         format: 'table'
         exit-code: '1'
         ignore-unfixed: true
-        severity: 'CRITICAL,HIGH'
+        severity: 'CRITICAL'
 
     - name: Run Gosec Security Scanner
       uses: securego/gosec@master

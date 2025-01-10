@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,6 +92,12 @@ func main() {
 		logFile = "logs/admin.log"
 	} else {
 		logFile = "logs/proxy.log"
+	}
+
+	// Validate and sanitize log file path
+	logFile = filepath.Clean(logFile)
+	if !strings.HasPrefix(logFile, "logs/") {
+		log.Fatalf("Invalid log file path: must be in logs directory")
 	}
 
 	// Create logs directory with more restrictive permissions
