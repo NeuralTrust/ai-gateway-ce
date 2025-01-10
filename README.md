@@ -7,15 +7,15 @@
 *A powerful, AI Gateway designed from scratch for AI*
 
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/NeuralTrust/ai-gateway-ce)](https://goreportcard.com/report/github.com/NeuralTrust/ai-gateway-ce)
+[![Go Report Card](https://goreportcard.com/badge/github.com/NeuralTrust/ai-gateway-ce)](https://goreportcard.com/report/github.com/NeuralTrust/ai-gateway-ce){:target="_blank"}
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Go Reference](https://pkg.go.dev/badge/github.com/NeuralTrust/ai-gateway-ce.svg)](https://pkg.go.dev/github.com/NeuralTrust/ai-gateway-ce)
-[![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/ai-gateway-ce.svg)](https://hub.docker.com/r/neuraltrust/ai-gateway-ce)
+[![Go Reference](https://pkg.go.dev/badge/github.com/NeuralTrust/ai-gateway-ce.svg)](https://pkg.go.dev/github.com/NeuralTrust/ai-gateway-ce){:target="_blank"}
+[![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/ai-gateway-ce.svg)](https://hub.docker.com/r/neuraltrust/ai-gateway-ce){:target="_blank"}
 
 
-[Documentation](https://docs.neuraltrust.ai) |
-[Quick Start](https://docs.neuraltrust.ai/category/step-by-step-guide) |
-[Community](https://discord.gg/f93QsGeR)
+[Documentation](https://docs.neuraltrust.ai){:target="_blank"} |
+[Quick Start](https://docs.neuraltrust.ai/category/step-by-step-guide){:target="_blank"} |
+[Community](https://discord.gg/f93QsGeR){:target="_blank"}
 
 </div>
 
@@ -112,11 +112,11 @@ AI Gateway CE is licensed under the Apache License 2.0 - see the [LICENSE](LICEN
 
 ## 📫 Community & Support
 
-- [Documentation](https://docs.neuraltrust.ai)
-- [Discord Community](https://discord.gg/f93QsGeR)
-- [GitHub Issues](https://github.com/neuraltrust/ai-gateway-ce/issues)
-- [Twitter](https://twitter.com/neuraltrust)
-- [Blog](https://neuraltrust.ai/en/resources/blog)
+- [Documentation](https://docs.neuraltrust.ai){:target="_blank"}
+- [Discord Community](https://discord.gg/f93QsGeR){:target="_blank"}
+- [GitHub Issues](https://github.com/neuraltrust/ai-gateway-ce/issues){:target="_blank"}
+- [Twitter](https://twitter.com/neuraltrust){:target="_blank"}
+- [Blog](https://neuraltrust.ai/en/resources/blog){:target="_blank"}
 
 ---
 
