@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"ai-gateway-ce/pkg/cache"
-	"ai-gateway-ce/pkg/models"
-	"ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/cache"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/models"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 
 	"github.com/sirupsen/logrus"
 )

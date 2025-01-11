@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 )
 
 // Custom types for database serialization

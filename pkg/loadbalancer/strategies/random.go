@@ -1,10 +1,11 @@
 package strategies
 
 import (
-	"ai-gateway-ce/pkg/types"
 	"crypto/rand"
 	"math/big"
 	"sync"
+
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 )
 
 type Random struct {

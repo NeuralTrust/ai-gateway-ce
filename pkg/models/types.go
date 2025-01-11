@@ -1,10 +1,11 @@
 package models
 
 import (
-	"ai-gateway-ce/pkg/types"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 )
 
 // JSON types for database storage

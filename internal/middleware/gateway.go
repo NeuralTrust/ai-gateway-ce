@@ -1,13 +1,14 @@
 package middleware
 
 import (
-	"ai-gateway-ce/pkg/cache"
-	"ai-gateway-ce/pkg/common"
-	"ai-gateway-ce/pkg/database"
 	"context"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/cache"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/database"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"

@@ -8,9 +8,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 
-	"ai-gateway-ce/pkg/cache"
-	"ai-gateway-ce/pkg/config"
-	"ai-gateway-ce/pkg/database"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/cache"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/config"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/database"
 )
 
 // Server interface defines the common behavior for all servers

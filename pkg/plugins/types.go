@@ -1,8 +1,7 @@
 package plugins
 
 import (
-	"ai-gateway-ce/pkg/types"
-
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 	"github.com/go-redis/redis/v8"
 	"github.com/sirupsen/logrus"
 )

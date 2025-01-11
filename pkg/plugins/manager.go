@@ -9,12 +9,12 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"ai-gateway-ce/pkg/cache"
-	"ai-gateway-ce/pkg/pluginiface"
-	"ai-gateway-ce/pkg/plugins/external_api"
-	"ai-gateway-ce/pkg/plugins/rate_limiter"
-	"ai-gateway-ce/pkg/plugins/token_rate_limiter"
-	"ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/cache"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/pluginiface"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/plugins/external_api"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/plugins/rate_limiter"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/plugins/token_rate_limiter"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 )
 
 var (

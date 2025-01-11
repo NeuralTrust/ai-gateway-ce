@@ -3,7 +3,7 @@ package pluginiface
 import (
 	"context"
 
-	"ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 )
 
 type Plugin interface {

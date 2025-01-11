@@ -1,11 +1,12 @@
 package cache
 
 import (
-	"ai-gateway-ce/pkg/models"
 	"context"
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/models"
 
 	"github.com/go-redis/redis/v8"
 )

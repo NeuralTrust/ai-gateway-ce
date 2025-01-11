@@ -12,11 +12,11 @@ import (
 
 	"github.com/sirupsen/logrus"
 
-	"ai-gateway-ce/pkg/cache"
-	"ai-gateway-ce/pkg/common"
-	"ai-gateway-ce/pkg/config"
-	"ai-gateway-ce/pkg/database"
-	"ai-gateway-ce/pkg/server"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/cache"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/config"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/database"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/server"
 )
 
 // syncWriter wraps a buffered writer and ensures each write is flushed

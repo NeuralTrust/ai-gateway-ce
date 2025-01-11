@@ -18,8 +18,11 @@ RUN go mod download
 # Copy source code
 COPY . .
 
+# Verify module dependencies
+RUN go mod verify
+
 # Build the application
-RUN go build -ldflags "-X github.com/NeuralTrust/ai-gateway-ce/pkg/version.Version=${VERSION} \
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X github.com/NeuralTrust/ai-gateway-ce/pkg/version.Version=${VERSION} \
                       -X github.com/NeuralTrust/ai-gateway-ce/pkg/version.GitCommit=${GIT_COMMIT} \
                       -X github.com/NeuralTrust/ai-gateway-ce/pkg/version.BuildDate=${BUILD_DATE}" \
     -o gateway ./cmd/gateway

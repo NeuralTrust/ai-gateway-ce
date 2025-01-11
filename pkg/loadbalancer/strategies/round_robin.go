@@ -1,8 +1,9 @@
 package strategies
 
 import (
-	"ai-gateway-ce/pkg/types"
 	"sync"
+
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 )
 
 // RoundRobin implements a simple round-robin load balancing strategy

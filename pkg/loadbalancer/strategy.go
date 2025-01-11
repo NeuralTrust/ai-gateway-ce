@@ -1,6 +1,6 @@
 package loadbalancer
 
-import "ai-gateway-ce/pkg/types"
+import "github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 
 // Strategy defines the interface for load balancing algorithms
 type Strategy interface {

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	"ai-gateway-ce/pkg/common"
-	"ai-gateway-ce/pkg/database"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/database"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"

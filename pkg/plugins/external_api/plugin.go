@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"ai-gateway-ce/pkg/common"
-	"ai-gateway-ce/pkg/pluginiface"
-	"ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/pluginiface"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
 
 	"github.com/sirupsen/logrus"
 )

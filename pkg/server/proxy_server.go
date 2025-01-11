@@ -17,16 +17,17 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/valyala/fasthttp"
 
-	"ai-gateway-ce/internal/middleware"
-	"ai-gateway-ce/pkg/cache"
-	"ai-gateway-ce/pkg/common"
-	"ai-gateway-ce/pkg/config"
-	"ai-gateway-ce/pkg/database"
-	"ai-gateway-ce/pkg/loadbalancer"
-	"ai-gateway-ce/pkg/models"
-	"ai-gateway-ce/pkg/pluginiface"
-	"ai-gateway-ce/pkg/plugins"
-	"ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/ai-gateway-ce/internal/middleware"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
+
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/cache"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/config"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/database"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/loadbalancer"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/models"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/pluginiface"
+	"github.com/NeuralTrust/ai-gateway-ce/pkg/plugins"
 
 	"golang.org/x/exp/slices"
 )
