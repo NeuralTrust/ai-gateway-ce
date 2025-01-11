@@ -19,9 +19,9 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN go build -ldflags "-X github.com/neuraltrust/ai-gateway-ce/pkg/version.Version=${VERSION} \
-                      -X github.com/neuraltrust/ai-gateway-ce/pkg/version.GitCommit=${GIT_COMMIT} \
-                      -X github.com/neuraltrust/ai-gateway-ce/pkg/version.BuildDate=${BUILD_DATE}" \
+RUN go build -ldflags "-X github.com/NeuralTrust/ai-gateway-ce/pkg/version.Version=${VERSION} \
+                      -X github.com/NeuralTrust/ai-gateway-ce/pkg/version.GitCommit=${GIT_COMMIT} \
+                      -X github.com/NeuralTrust/ai-gateway-ce/pkg/version.BuildDate=${BUILD_DATE}" \
     -o gateway ./cmd/gateway
 
 # Final stage
