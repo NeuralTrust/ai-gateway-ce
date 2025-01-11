@@ -16,20 +16,12 @@ run:
   exclude-files:
     - "vendor/.*"
     - "_test\\.go$"
-  tests: true
 
 linters-settings:
   errcheck:
     check-type-assertions: true
     check-blank: true
     ignore: fmt:.*,write,close
-  gocyclo:
-    min-complexity: 15
-  dupl:
-    threshold: 100
-  goconst:
-    min-len: 3
-    min-occurrences: 3
 
 issues:
   exclude-rules:
@@ -50,9 +42,4 @@ issues:
         - errcheck
 
   max-issues-per-linter: 0
-  max-same-issues: 0
-
-output:
-  format: colored-line-number
-  print-issued-lines: true
-  print-linter-name: true 
+  max-same-issues: 0 
