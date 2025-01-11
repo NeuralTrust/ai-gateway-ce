@@ -202,27 +202,3 @@ func (lb *LoadBalancer) fallbackTarget(ctx context.Context) (*types.UpstreamTarg
 	}
 	return nil, fmt.Errorf("no targets available for fallback")
 }
-
-func (lb *LoadBalancer) updateTargetStatus(target *types.UpstreamTarget, status *TargetStatus) {
-	lb.mu.Lock()
-	defer lb.mu.Unlock()
-
-	lb.targetStatus[target.ID] = status
-
-	// Cache the status
-	if lb.cache != nil {
-		key := fmt.Sprintf("target_status:%s", target.ID)
-		statusJSON, err := json.Marshal(status)
-		if err != nil {
-			lb.logger.WithError(err).Error("Failed to marshal target status")
-			return
-		}
-
-		if err := lb.cache.Set(context.Background(), key, string(statusJSON), time.Hour); err != nil {
-			lb.logger.WithFields(logrus.Fields{
-				"target": target.ID,
-				"error":  err,
-			}).Error("Failed to cache target status")
-		}
-	}
-}
