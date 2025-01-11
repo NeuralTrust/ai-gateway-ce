@@ -35,7 +35,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v4
         with:
-          images: docker.io/${{ secrets.DOCKER_USERNAME }}/ai-gateway-ce
+          images: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/ai-gateway-ce
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -52,5 +52,5 @@ jobs:
             VERSION=${{ github.ref_name }}
             GIT_COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.date.outputs.date }}
-          cache-from: type=registry,ref=docker.io/${{ secrets.DOCKER_USERNAME }}/ai-gateway-ce:buildcache
-          cache-to: type=registry,ref=docker.io/${{ secrets.DOCKER_USERNAME }}/ai-gateway-ce:buildcache,mode=max 
+          cache-from: type=registry,ref=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/ai-gateway-ce:buildcache
+          cache-to: type=registry,ref=docker.io/${{ secrets.DOCKERHUB_USERNAME }}/ai-gateway-ce:buildcache,mode=max 
