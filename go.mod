@@ -2,8 +2,6 @@ module github.com/NeuralTrust/ai-gateway-ce
 
 go 1.22
 
-toolchain go1.22.4
-
 require (
 	github.com/bytedance/sonic v1.12.5
 	github.com/gin-gonic/gin v1.10.0
