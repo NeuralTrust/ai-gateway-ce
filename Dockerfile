@@ -34,7 +34,6 @@ RUN apk add --no-cache ca-certificates tzdata
 
 # Copy binary and config files
 COPY --from=builder /build/gateway /app/
-COPY config.yaml /app/
 COPY config/ /app/config/
 
 # Set environment variables
