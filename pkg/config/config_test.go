@@ -13,7 +13,12 @@ func TestLoadConfig(t *testing.T) {
 		// Save current working directory
 		currentDir, err := os.Getwd()
 		assert.NoError(t, err)
-		defer os.Chdir(currentDir)
+		defer func() {
+			err := os.Chdir(currentDir)
+			if err != nil {
+				t.Errorf("Failed to change back to original directory: %v", err)
+			}
+		}()
 
 		// Create a temporary directory and change to it
 		tmpDir := t.TempDir()
