@@ -22,12 +22,15 @@
 ## ✨ Features
 
 - 🚀 **High Performance**: Built in Go for maximum efficiency and minimal latency
+- 🌍 **Multi-Provider**: Multiple LLM provider support
+- 🤖 **AI-Ready**: Optimized for AI model providers (OpenAI, Anthropic, etc.)
+- 🔄 **Fallback Ready**: Built-in model fallback capabilities
 - 🔄 **Load Balancing**: Advanced algorithms including round-robin, weighted round-robin, and IP hash
 - 🔒 **Security**: Built-in authentication, rate limiting, and token management
 - 🔌 **Plugin System**: Extensible architecture for custom functionality
 - ⚡ **Real-time Config**: Dynamic configuration without restarts
-- 🌐 **Multi-gateway**: Complete isolation between different gateways
-- 🤖 **AI-Ready**: Optimized for AI model providers (OpenAI, Anthropic, etc.)
+- ☁️ **Cloud Agnostic**: Deploy anywhere with cloud-agnostic architecture
+
 
 ## 🚀 Quick Start
 
@@ -65,7 +68,7 @@ docker compose up -d redis postgres
 AI Gateway CE consists of two main components:
 
 1. **Admin API** (Port 8080)
-   - Tenant management
+   - Gateway management
    - Configuration management
    - API key management
    - Plugin configuration
@@ -75,7 +78,7 @@ AI Gateway CE consists of two main components:
    - Load balancing
    - Plugin execution
 
-## 🔌 Plugin System
+## 🔌 Plugins
 
 Extend functionality with plugins:
 
@@ -87,10 +90,41 @@ type Plugin interface {
 }
 ```
 
-Built-in plugins:
+### Current Plugins:
 - Rate Limiter
 - Token Rate Limiter
 - External API Call
+
+### 🔜 Coming Soon Plugins
+
+#### Security
+- **Jailbreak Protection**
+  - Azure Prompt Guard
+  - AWS Prompt Guard
+  - GCP Prompt Guard
+
+- **Toxicity Detection**
+  - Open AI Moderation API integration
+  - Legacy toxicity detection methods
+
+- **Prompt Moderation**
+  - Keywords & REGEX filtering
+  - Topic detection (accepted/denied)
+
+- **Data Masking**
+  - Pre-defined entity masking
+  - Custom data masking (keywords, regex patterns)
+
+- **Network Security**
+  - CORS protection
+  - SQL Injection prevention
+  - Cross-site injection protection
+
+- **Load Balancing**
+  - Weight-based routing
+  - Round-robin distribution
+  - Prompt templates support
+
 
 ## 🤝 Contributing
 
@@ -118,7 +152,6 @@ AI Gateway CE is licensed under the Apache License 2.0 - see the [LICENSE](LICEN
 - [Twitter](https://twitter.com/neuraltrust)
 - [Blog](https://neuraltrust.ai/en/resources/blog)
 
----
 
 <div align="center">
 Made with ❤️ by <a href="https://neuraltrust.ai">NeuralTrust</a>
