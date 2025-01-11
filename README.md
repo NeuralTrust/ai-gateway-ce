@@ -6,7 +6,7 @@
 
 *A powerful, AI Gateway designed from scratch for AI*
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/NeuralTrust/ai-gateway-ce.svg)](https://pkg.go.dev/github.com/NeuralTrust/ai-gateway-ce)
+[![Go Reference](https://pkg.go.dev/badge/github.com/NeuralTrust/ai-gateway-ce.svg)](https://pkg.go.dev/github.com/NeuralTrust/ai-gateway-ce@v0.1.0)
 [![Go Report Card](https://goreportcard.com/badge/github.com/NeuralTrust/ai-gateway-ce)](https://goreportcard.com/report/github.com/NeuralTrust/ai-gateway-ce)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/ai-gateway-ce.svg)](https://hub.docker.com/r/neuraltrust/ai-gateway-ce)
