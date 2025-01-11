@@ -11,11 +11,12 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Go Reference](https://pkg.go.dev/badge/github.com/NeuralTrust/ai-gateway-ce.svg)](https://pkg.go.dev/github.com/NeuralTrust/ai-gateway-ce)
 [![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/ai-gateway-ce.svg)](https://hub.docker.com/r/neuraltrust/ai-gateway-ce)
+[![GitHub Actions](https://github.com/NeuralTrust/ai-gateway-ce/actions/workflows/release.yml/badge.svg)](https://github.com/NeuralTrust/ai-gateway-ce/actions/workflows/release.yml)
 
 
 [Documentation](https://docs.neuraltrust.ai) |
 [Quick Start](https://docs.neuraltrust.ai/category/step-by-step-guide) |
-[Community](https://discord.gg/f93QsGeR)
+[Community](https://join.slack.com/t/neuraltrustcommunity/shared_invite/zt-2xl47cag6-_HFNpltIULnA3wh4R6AqBg)
 
 </div>
 
@@ -147,7 +148,7 @@ AI Gateway CE is licensed under the Apache License 2.0 - see the [LICENSE](LICEN
 ## 📫 Community & Support
 
 - [Documentation](https://docs.neuraltrust.ai)
-- [Discord Community](https://discord.gg/f93QsGeR)
+- [Slack Community](https://join.slack.com/t/neuraltrustcommunity/shared_invite/zt-2xl47cag6-_HFNpltIULnA3wh4R6AqBg)
 - [GitHub Issues](https://github.com/neuraltrust/ai-gateway-ce/issues)
 - [Twitter](https://twitter.com/neuraltrust)
 - [Blog](https://neuraltrust.ai/en/resources/blog)
