@@ -1,4 +1,4 @@
-module ai-gateway-ce
+module github.com/NeuralTrust/ai-gateway-ce
 
 go 1.22
 
