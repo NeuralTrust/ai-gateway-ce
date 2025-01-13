@@ -11,9 +11,9 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/sirupsen/logrus"
 
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/pluginiface"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/TrustGate/pkg/common"
+	"github.com/NeuralTrust/TrustGate/pkg/pluginiface"
+	"github.com/NeuralTrust/TrustGate/pkg/types"
 )
 
 const (

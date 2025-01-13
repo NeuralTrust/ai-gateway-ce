@@ -1,4 +1,4 @@
-# AI Gateway CE
+# TrustGate
 
 <div align="center">
 
@@ -6,11 +6,11 @@
 
 *A powerful, AI Gateway designed from scratch for AI*
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/NeuralTrust/ai-gateway-ce.svg)](https://pkg.go.dev/github.com/NeuralTrust/ai-gateway-ce@v0.1.0)
-[![Go Report Card](https://goreportcard.com/badge/github.com/NeuralTrust/ai-gateway-ce)](https://goreportcard.com/report/github.com/NeuralTrust/ai-gateway-ce)
+[![Go Reference](https://pkg.go.dev/badge/github.com/NeuralTrust/TrustGate.svg)](https://pkg.go.dev/github.com/NeuralTrust/TrustGate@v0.1.0)
+[![Go Report Card](https://goreportcard.com/badge/github.com/NeuralTrust/TrustGate)](https://goreportcard.com/report/github.com/NeuralTrust/TrustGate)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/ai-gateway-ce.svg)](https://hub.docker.com/r/neuraltrust/ai-gateway-ce)
-[![GitHub Actions](https://github.com/NeuralTrust/ai-gateway-ce/actions/workflows/release.yml/badge.svg)](https://github.com/NeuralTrust/ai-gateway-ce/actions/workflows/release.yml)
+[![GitHub Actions](https://github.com/NeuralTrust/TrustGate/actions/workflows/release.yml/badge.svg)](https://github.com/NeuralTrust/TrustGate/actions/workflows/release.yml)
 
 
 [Documentation](https://docs.neuraltrust.ai) |
@@ -38,7 +38,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/NeuralTrust/ai-gateway-ce.git
+git clone https://github.com/NeuralTrust/TrustGate.git
 cd ai-gateway-ce
 
 # Start the services
@@ -148,7 +148,7 @@ AI Gateway CE is licensed under the Apache License 2.0 - see the [LICENSE](LICEN
 
 - [Documentation](https://docs.neuraltrust.ai)
 - [Slack Community](https://join.slack.com/t/neuraltrustcommunity/shared_invite/zt-2xl47cag6-_HFNpltIULnA3wh4R6AqBg)
-- [GitHub Issues](https://github.com/neuraltrust/ai-gateway-ce/issues)
+- [GitHub Issues](https://github.com/NeuralTrust/TrustGate/issues)
 - [Twitter](https://twitter.com/neuraltrust)
 - [Blog](https://neuraltrust.ai/en/resources/blog)
 

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/cache"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/database"
+	"github.com/NeuralTrust/TrustGate/pkg/cache"
+	"github.com/NeuralTrust/TrustGate/pkg/common"
+	"github.com/NeuralTrust/TrustGate/pkg/database"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"

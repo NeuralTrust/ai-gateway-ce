@@ -10,8 +10,8 @@ import (
 	"github.com/go-redis/redis/v8"
 	"gorm.io/gorm"
 
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/models"
+	"github.com/NeuralTrust/TrustGate/pkg/common"
+	"github.com/NeuralTrust/TrustGate/pkg/models"
 )
 
 // Cache implements the common.Cache interface

@@ -3,8 +3,8 @@ package loadbalancer
 import (
 	"fmt"
 
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/loadbalancer/strategies"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/TrustGate/pkg/loadbalancer/strategies"
+	"github.com/NeuralTrust/TrustGate/pkg/types"
 )
 
 // BaseFactory implements the Factory interface with basic strategies

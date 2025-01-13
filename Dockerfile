@@ -22,9 +22,9 @@ COPY . .
 RUN go mod verify
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X github.com/NeuralTrust/ai-gateway-ce/pkg/version.Version=${VERSION} \
-                      -X github.com/NeuralTrust/ai-gateway-ce/pkg/version.GitCommit=${GIT_COMMIT} \
-                      -X github.com/NeuralTrust/ai-gateway-ce/pkg/version.BuildDate=${BUILD_DATE}" \
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X github.com/NeuralTrust/TrustGate/pkg/version.Version=${VERSION} \
+                      -X github.com/NeuralTrust/TrustGate/pkg/version.GitCommit=${GIT_COMMIT} \
+                      -X github.com/NeuralTrust/TrustGate/pkg/version.BuildDate=${BUILD_DATE}" \
     -o gateway ./cmd/gateway
 
 # Final stage

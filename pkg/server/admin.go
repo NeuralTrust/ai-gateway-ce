@@ -16,14 +16,14 @@ import (
 	"github.com/lib/pq"
 	"github.com/sirupsen/logrus"
 
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/cache"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/config"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/database"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/models"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/pluginiface"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/plugins"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/TrustGate/pkg/cache"
+	"github.com/NeuralTrust/TrustGate/pkg/common"
+	"github.com/NeuralTrust/TrustGate/pkg/config"
+	"github.com/NeuralTrust/TrustGate/pkg/database"
+	"github.com/NeuralTrust/TrustGate/pkg/models"
+	"github.com/NeuralTrust/TrustGate/pkg/pluginiface"
+	"github.com/NeuralTrust/TrustGate/pkg/plugins"
+	"github.com/NeuralTrust/TrustGate/pkg/types"
 )
 
 type AdminServer struct {

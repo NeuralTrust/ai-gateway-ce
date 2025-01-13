@@ -5,7 +5,7 @@ import (
 	"math/big"
 	"sync"
 
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/TrustGate/pkg/types"
 )
 
 type Random struct {

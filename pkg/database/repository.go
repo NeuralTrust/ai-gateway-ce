@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/cache"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/common"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/models"
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/types"
+	"github.com/NeuralTrust/TrustGate/pkg/cache"
+	"github.com/NeuralTrust/TrustGate/pkg/common"
+	"github.com/NeuralTrust/TrustGate/pkg/models"
+	"github.com/NeuralTrust/TrustGate/pkg/types"
 
 	"github.com/sirupsen/logrus"
 	"gorm.io/gorm"

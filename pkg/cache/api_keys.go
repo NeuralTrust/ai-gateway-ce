@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/models"
+	"github.com/NeuralTrust/TrustGate/pkg/models"
 
 	"github.com/go-redis/redis/v8"
 )

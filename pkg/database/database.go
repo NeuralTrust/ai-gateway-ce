@@ -3,7 +3,7 @@ package database
 import (
 	"fmt"
 
-	"github.com/NeuralTrust/ai-gateway-ce/pkg/models"
+	"github.com/NeuralTrust/TrustGate/pkg/models"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"

@@ -1,4 +1,4 @@
-module github.com/NeuralTrust/ai-gateway-ce
+module github.com/NeuralTrust/TrustGate
 
 go 1.22
 
