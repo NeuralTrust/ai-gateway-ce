@@ -9,7 +9,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/NeuralTrust/TrustGate.svg)](https://pkg.go.dev/github.com/NeuralTrust/TrustGate@v0.1.0)
 [![Go Report Card](https://goreportcard.com/badge/github.com/NeuralTrust/TrustGate)](https://goreportcard.com/report/github.com/NeuralTrust/TrustGate)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/ai-gateway-ce.svg)](https://hub.docker.com/r/neuraltrust/ai-gateway-ce)
+[![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/trustgate.svg)](https://hub.docker.com/r/neuraltrust/trustgate)
 [![GitHub Actions](https://github.com/NeuralTrust/TrustGate/actions/workflows/release.yml/badge.svg)](https://github.com/NeuralTrust/TrustGate/actions/workflows/release.yml)
 
 
@@ -39,7 +39,7 @@
 ```bash
 # Clone the repository
 git clone https://github.com/NeuralTrust/TrustGate.git
-cd ai-gateway-ce
+cd TrustGate
 
 # Start the services
 docker compose -f docker-compose.prod.yaml up -d
@@ -142,7 +142,7 @@ AI Gateway CE is licensed under the Apache License 2.0 - see the [LICENSE](LICEN
 
 ## 🌟 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=neuraltrust/ai-gateway-ce&type=Date)](https://star-history.com/#neuraltrust/ai-gateway-ce&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=NeuralTrust/TrustGate&type=Date)](https://star-history.com/#NeuralTrust/TrustGate&Date)
 
 ## 📫 Community & Support
 
