@@ -287,8 +287,15 @@ func evaluateCondition(actual interface{}, operator string, expected interface{}
 	case "neq":
 		return actual != expected
 	case "gt":
-		// Add numeric comparisons if needed
-		return false
+		// Convert to float64 for numeric comparison
+		actualFloat, aok := actual.(float64)
+		expectedFloat, eok := expected.(float64)
+		return aok && eok && actualFloat > expectedFloat
+	case "lt":
+		// Convert to float64 for numeric comparison
+		actualFloat, aok := actual.(float64)
+		expectedFloat, eok := expected.(float64)
+		return aok && eok && actualFloat < expectedFloat
 	default:
 		return false
 	}

@@ -139,7 +139,7 @@ We love contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for 
 
 ## 📜 License
 
-AI Gateway CE is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+TrustGate is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 
 ## 🌟 Star History
 
