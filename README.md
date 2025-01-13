@@ -86,8 +86,9 @@ Extend functionality with plugins:
 ```go
 type Plugin interface {
     Name() string
+    Stages() []types.Stage
+    AllowedStages() []types.Stage
     Execute(ctx *Context) error
-    Configure(config map[string]interface{}) error
 }
 ```
 
