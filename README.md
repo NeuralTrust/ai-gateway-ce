@@ -10,7 +10,8 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/NeuralTrust/TrustGate)](https://goreportcard.com/report/github.com/NeuralTrust/TrustGate)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Docker Pulls](https://img.shields.io/docker/pulls/neuraltrust/trustgate.svg)](https://hub.docker.com/r/neuraltrust/trustgate)
-[![GitHub Actions](https://github.com/NeuralTrust/TrustGate/actions/workflows/release.yml/badge.svg)](https://github.com/NeuralTrust/TrustGate/actions/workflows/release.yml)
+[![GitHub Actions](https://github.com/NeuralTrust/TrustGate/actions/workflows/ci.yml/badge.svg)](https://github.com/NeuralTrust/TrustGate/actions/workflows/ci.yml)
+[![GitHub Actions](https://github.com/NeuralTrust/TrustGate/actions/workflows/security.yml/badge.svg)](https://github.com/NeuralTrust/TrustGate/actions/workflows/security.yml)
 
 
 [Documentation](https://docs.neuraltrust.ai) |
