@@ -12,6 +12,7 @@ import (
 	"github.com/NeuralTrust/TrustGate/pkg/cache"
 	"github.com/NeuralTrust/TrustGate/pkg/pluginiface"
 	"github.com/NeuralTrust/TrustGate/pkg/plugins/external_api"
+	"github.com/NeuralTrust/TrustGate/pkg/plugins/prompt_moderation"
 	"github.com/NeuralTrust/TrustGate/pkg/plugins/rate_limiter"
 	"github.com/NeuralTrust/TrustGate/pkg/plugins/token_rate_limiter"
 	"github.com/NeuralTrust/TrustGate/pkg/types"
@@ -61,6 +62,10 @@ func InitializePlugins(cache *cache.Cache, logger *logrus.Logger) {
 
 	if err := manager.RegisterPlugin(token_rate_limiter.NewTokenRateLimiterPlugin(logger, cache.Client())); err != nil {
 		logger.WithError(err).Error("Failed to register token rate limiter plugin")
+	}
+
+	if err := manager.RegisterPlugin(prompt_moderation.NewPromptModerationPlugin(logger)); err != nil {
+		logger.WithError(err).Error("Failed to register prompt moderation plugin")
 	}
 }
 
