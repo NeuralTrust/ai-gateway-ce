@@ -27,24 +27,51 @@ GATEWAY_RESPONSE=$(curl -s -X POST "$ADMIN_URL/gateways" \
             "stage": "pre_response",
             "priority": 1,
             "settings": {
+                "similarity_threshold": 0.8,
+                "predefined_entities": [
+                    {
+                        "entity": "credit_card",
+                        "enabled": true,
+                        "mask_with": "[MASKED_CC]",
+                        "preserve_len": false
+                    },
+                    {
+                        "entity": "email",
+                        "enabled": true,
+                        "mask_with": "[MASKED_EMAIL]",
+                        "preserve_len": false
+                    },
+                    {
+                        "entity": "iban",
+                        "enabled": true,
+                        "mask_with": "[MASKED_IBAN]",
+                        "preserve_len": false
+                    },
+                    {
+                        "entity": "swift_bic",
+                        "enabled": true,
+                        "mask_with": "[MASKED_BIC]",
+                        "preserve_len": false
+                    },
+                    {
+                        "entity": "crypto_wallet",
+                        "enabled": true,
+                        "mask_with": "[MASKED_WALLET]",
+                        "preserve_len": false
+                    },
+                    {
+                        "entity": "tax_id",
+                        "enabled": true,
+                        "mask_with": "[MASKED_TAX_ID]",
+                        "preserve_len": true
+                    }
+                ],
                 "rules": [
                     {
-                        "pattern": "credit_card",
+                        "pattern": "secret_key",
                         "type": "keyword",
                         "mask_with": "****",
                         "preserve_len": true
-                    },
-                    {
-                        "pattern": "\\b\\d{4}[-\\s]?\\d{4}[-\\s]?\\d{4}[-\\s]?\\d{4}\\b",
-                        "type": "regex",
-                        "mask_with": "X",
-                        "preserve_len": true
-                    },
-                    {
-                        "pattern": "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b",
-                        "type": "regex",
-                        "mask_with": "[MASKED_EMAIL]",
-                        "preserve_len": false
                     }
                 ]
             }
@@ -149,16 +176,21 @@ sleep 2
 # Test data masking
 echo -e "\n${GREEN}6. Testing data masking...${NC}"
 
-# Test keyword masking
-echo -e "\n${GREEN}6.1 Testing keyword masking...${NC}"
+# Test all masking patterns
+echo -e "\n${GREEN}6.1 Testing all masking patterns...${NC}"
 RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/post" \
     -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
     -H "X-API-Key: ${API_KEY}" \
     -H "Content-Type: application/json" \
     -d '{
-        "message": "My credit_card number is 4111-2222-3333-4444",
+        "credit_card": "4111-2222-3333-4444",
         "email": "test@example.com",
-        "notes": "This is a test message"
+        "iban": "DE89370400440532013000",
+        "swift_bic": "DEUTDEFF500",
+        "crypto_wallet": "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+        "tax_id": "12-3456789",
+        "secret_key": "this_is_secret",
+        "similar_secrets": "secret_keys_here"
     }')
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
@@ -169,24 +201,76 @@ if [ "$HTTP_CODE" == "200" ]; then
     echo "Response body:"
     echo "$BODY" | jq '.'
     
-    # Check if masking worked
-    if echo "$BODY" | grep -q "credit_card"; then
-        echo -e "${RED}WARNING: Keyword 'credit_card' was not masked${NC}"
-    else
-        echo -e "${GREEN}Keyword masking successful${NC}"
-    fi
+    # Check each pattern
+    PATTERNS=(
+        "4111-2222-3333-4444"
+        "test@example.com"
+        "DE89370400440532013000"
+        "DEUTDEFF500"
+        "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+        "12-3456789"
+        "this_is_secret"
+        "secret_keys_here"
+    )
     
-    if echo "$BODY" | grep -q "4111-2222-3333-4444"; then
-        echo -e "${RED}WARNING: Credit card number was not masked${NC}"
-    else
-        echo -e "${GREEN}Credit card number masking successful${NC}"
-    fi
+    for pattern in "${PATTERNS[@]}"; do
+        if echo "$BODY" | grep -q "$pattern"; then
+            echo -e "${RED}WARNING: Pattern '$pattern' was not masked${NC}"
+        else
+            echo -e "${GREEN}Successfully masked: $pattern${NC}"
+        fi
+    done
+
+    # Verify masked values are present
+    MASKS=(
+        "[MASKED_CC]"
+        "[MASKED_EMAIL]"
+        "[MASKED_IBAN]"
+        "[MASKED_BIC]"
+        "[MASKED_WALLET]"
+        "[MASKED_TAX_ID]"
+    )
     
-    if echo "$BODY" | grep -q "test@example.com"; then
-        echo -e "${RED}WARNING: Email was not masked${NC}"
-    else
-        echo -e "${GREEN}Email masking successful${NC}"
-    fi
+    for mask in "${MASKS[@]}"; do
+        if echo "$BODY" | grep -q "$mask"; then
+            echo -e "${GREEN}Found expected mask: $mask${NC}"
+        else
+            echo -e "${RED}WARNING: Expected mask '$mask' not found${NC}"
+        fi
+    done
+else
+    echo -e "${RED}Request failed with status code: $HTTP_CODE${NC}"
+    echo "Response: $BODY"
+fi
+
+# Test fuzzy matching
+echo -e "\n${GREEN}6.2 Testing fuzzy matching...${NC}"
+RESPONSE=$(curl -s -w "\n%{http_code}" "$PROXY_URL/post" \
+    -H "Host: ${SUBDOMAIN}.${BASE_DOMAIN}" \
+    -H "X-API-Key: ${API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "message": "my sekret_key and secret-key should be masked",
+        "notes": "Testing fuzzy matching"
+    }')
+
+HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+BODY=$(echo "$RESPONSE" | head -n1)
+
+if [ "$HTTP_CODE" == "200" ]; then
+    echo -e "${GREEN}Request successful${NC}"
+    echo "Response body:"
+    echo "$BODY" | jq '.'
+    
+    # Check fuzzy matches
+    FUZZY_TERMS=("sekret_key" "secret-key")
+    for term in "${FUZZY_TERMS[@]}"; do
+        if echo "$BODY" | grep -q "$term"; then
+            echo -e "${RED}WARNING: Similar term '$term' was not masked${NC}"
+        else
+            echo -e "${GREEN}Fuzzy masking successful for '$term'${NC}"
+        fi
+    done
 else
     echo -e "${RED}Request failed with status code: $HTTP_CODE${NC}"
     echo "Response: $BODY"
