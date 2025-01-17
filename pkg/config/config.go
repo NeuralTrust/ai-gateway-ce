@@ -2,25 +2,40 @@ package config
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/spf13/viper"
 )
 
-// Config holds all configuration
+// MetricsConfig holds configuration for metrics collection
+type MetricsConfig struct {
+	Enabled           bool `yaml:"enabled"`
+	RetentionDays     int  `yaml:"retention_days"`
+	EnableLatency     bool `yaml:"enable_latency"`
+	EnableUpstream    bool `yaml:"enable_upstream"`
+	EnableBandwidth   bool `yaml:"enable_bandwidth"`
+	EnableConnections bool `yaml:"enable_connections"`
+	EnablePerRoute    bool `yaml:"enable_per_route"`
+	EnableDetailed    bool `yaml:"enable_detailed_status"`
+}
+
+// Config represents the main configuration structure
 type Config struct {
-	Server    ServerConfig    `mapstructure:"server"`
-	Database  DatabaseConfig  `mapstructure:"database"`
-	Redis     RedisConfig     `mapstructure:"redis"`
-	Providers ProvidersConfig `mapstructure:"providers"`
+	Server    ServerConfig    `yaml:"server"`
+	Metrics   MetricsConfig   `yaml:"metrics"`
+	Database  DatabaseConfig  `yaml:"database"`
+	Redis     RedisConfig     `yaml:"redis"`
+	Providers ProvidersConfig `yaml:"providers"`
 }
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
-	AdminPort  int    `mapstructure:"admin_port"`
-	ProxyPort  int    `mapstructure:"proxy_port"`
-	Host       string `mapstructure:"host"`
-	BaseDomain string `mapstructure:"base_domain"`
+	AdminPort   int    `mapstructure:"admin_port"`
+	ProxyPort   int    `mapstructure:"proxy_port"`
+	MetricsPort int    `mapstructure:"metrics_port"`
+	Type        string `mapstructure:"type"`
+	Port        int    `mapstructure:"port"`
+	BaseDomain  string `mapstructure:"base_domain"`
+	Host        string `mapstructure:"host"`
 }
 
 // DatabaseConfig holds database configuration
@@ -64,7 +79,6 @@ func Load() error {
 	if err := viper.Unmarshal(&globalConfig); err != nil {
 		return fmt.Errorf("failed to unmarshal config: %w", err)
 	}
-	log.Println("config", "config", globalConfig)
 
 	// Load provider config
 	providerConfig, err := LoadProviderConfig()

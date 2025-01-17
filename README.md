@@ -66,7 +66,7 @@ docker compose up -d redis postgres
 
 ## 🏗️ Architecture
 
-AI Gateway CE consists of two main components:
+TrustGate consists of two main components:
 
 1. **Admin API** (Port 8080)
    - Gateway management
